@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit Configuration for Faculty Allotment System
+language: "en-US"
+tone_instructions: "You are reviewing the Faculty Allotment System, an examination invigilation management platform built with Node.js, Express, strict TypeScript, Better-SQLite3, React 19, and Vite. Prioritize hard scheduling constraint satisfaction (H1-H7), transactional data integrity, optimistic concurrency control, immutable approved schedule versions, exact Excel template preservation, and zero-leakage security standards."
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "master"
+      - "main"
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/*.db"
+    - "!**/*.db-*"
+    - "!**/scratch/**"
+    - "!**/allotment-fidelity-*"
+    - "!**/.vitest-cache/**"
+
+chat:
+  auto_reply: true

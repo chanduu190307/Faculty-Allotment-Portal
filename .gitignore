@@ -1,0 +1,48 @@
+# Dependency directories
+node_modules/
+*/node_modules/
+
+# Production build outputs
+dist/
+*/dist/
+
+# Environment files containing local secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# SQLite local databases, journals, and backups
+*.db*
+*.bak
+*.backup
+*.sqlite*
+
+# Temporary test artifacts and scratch output
+scratch/
+server/scratch/
+allotment-fidelity-*.xlsx
+allotment-fidelity-*.pdf
+
+# Logs and debug files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage & caches
+coverage/
+.vitest-cache/
+*/.vitest-cache/
+.vite/
+*/.vite/
+
+# Operating system & IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
