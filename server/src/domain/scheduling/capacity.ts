@@ -97,7 +97,14 @@ export function checkCapacityFeasibility(
   faculty: Faculty[],
   leaves: FacultyLeave[],
   defaultMaxDuties: number,
-  restDays: number = 1
+  restDays: number = 1,
+  configContext: {
+    expectedRoomCount?: number;
+    expectedFacultyCount?: number;
+    timetableSessions?: Array<{ date: string; session: string }>;
+    timetableRecordsCount?: number;
+    requireDualRole?: boolean;
+  } = {}
 ): PreflightCheckResult {
   const examDates = getOrderedExamDates(dates);
   const dateIndexMap = getExamDateIndexMap(examDates);
@@ -107,13 +114,23 @@ export function checkCapacityFeasibility(
   const activeFaculty = faculty.filter((f) => f.active && !f.exempt);
 
   // 1. Calculate required staffing for each examination date & aggregate
+  const roleMultiplier = configContext.requireDualRole ? 2 : 1;
   let totalRequiredSlots = 0;
   const dailyRequired = new Map<string, number>();
   for (const dateObj of examDates) {
     let daySlots = 0;
-    for (const _session of sessions) {
+    const dateSessions =
+      configContext.timetableSessions && configContext.timetableSessions.length > 0
+        ? sessions.filter((s) =>
+            configContext.timetableSessions!.some(
+              (ts) => ts.date === dateObj.date && ts.session.toLowerCase() === s.name.toLowerCase()
+            )
+          )
+        : sessions;
+
+    for (const _session of dateSessions) {
       for (const room of activeRooms) {
-        daySlots += room.requiredStaffing ?? 1;
+        daySlots += (room.requiredStaffing ?? 1) * roleMultiplier;
       }
     }
     dailyRequired.set(dateObj.date, daySlots);
@@ -140,7 +157,7 @@ export function checkCapacityFeasibility(
           l.facultyId === f.id &&
           l.date === currentDate &&
           l.approvalStatus !== 'REJECTED' &&
-          l.sessionScope === 'FULL_DAY'
+          (l.sessionScope === 'FULL_DAY' || !l.sessionScope)
       );
       if (onFullDayLeave) return false;
 
@@ -282,6 +299,29 @@ export function checkCapacityFeasibility(
     );
   }
 
+  const expectedRoomCount = configContext.expectedRoomCount;
+  const expectedFacultyCount = configContext.expectedFacultyCount;
+  const registeredRoomsTotal = rooms.length;
+  const registeredRoomsActive = activeRooms.length;
+  const registeredFacultyTotal = faculty.length;
+  const registeredFacultyActive = faculty.filter((f) => f.active).length;
+  const registeredFacultyExempt = faculty.filter((f) => f.exempt).length;
+  const registeredFacultyUnavailable = registeredFacultyTotal - activeFaculty.length;
+  const roomsMismatch = expectedRoomCount !== undefined && expectedRoomCount !== registeredRoomsActive;
+  const facultyMismatch = expectedFacultyCount !== undefined && expectedFacultyCount !== registeredFacultyActive;
+
+  const warnings: string[] = [];
+  if (roomsMismatch) {
+    warnings.push(
+      `Room Count Mismatch: Configured expected rooms (${expectedRoomCount}) does not match registered active rooms (${registeredRoomsActive}).`
+    );
+  }
+  if (facultyMismatch) {
+    warnings.push(
+      `Faculty Count Mismatch: Configured expected teachers (${expectedFacultyCount}) does not match registered active teachers (${registeredFacultyActive}). Scheduling capacity is evaluated using registered eligible faculty (${activeFaculty.length}).`
+    );
+  }
+
   return {
     isFeasible,
     totalRequiredSlots,
@@ -291,6 +331,7 @@ export function checkCapacityFeasibility(
     maxWorkingDaysPerTeacher: maxWorkingDays,
     reasons,
     remedies,
+    warnings: warnings.length > 0 ? warnings : undefined,
     dailyShortfalls: dailyShortfalls.length > 0 ? dailyShortfalls : undefined,
     pairShortfalls: pairShortfalls.length > 0 ? pairShortfalls : undefined,
     diagnosticDetails: {
@@ -301,6 +342,21 @@ export function checkCapacityFeasibility(
       defaultMaxDuties,
       effectiveMaxDutiesPerTeacher: Math.min(defaultMaxDuties, maxWorkingDays),
       theoreticalMaxCapacity: totalPossibleCapacity,
+      expectedRoomCount,
+      registeredRoomsTotal,
+      registeredRoomsActive,
+      roomsMismatch,
+      expectedFacultyCount,
+      registeredFacultyTotal,
+      registeredFacultyActive,
+      registeredFacultyExempt,
+      registeredFacultyUnavailable,
+      eligibleFacultyCount: activeFaculty.length,
+      facultyMismatch,
+      timetableRecordsCount: configContext.timetableRecordsCount,
+      timetableSessionsCount: configContext.timetableSessions?.length,
+      timetableConfirmed: Boolean(configContext.timetableRecordsCount && configContext.timetableRecordsCount > 0),
+      requireDualRole: Boolean(configContext.requireDualRole),
     },
   };
 }

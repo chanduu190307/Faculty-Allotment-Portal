@@ -2,20 +2,53 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { Modal } from '../components/Modal';
 import { Badge } from '../components/Badge';
-import { Search, Plus, Edit2, Trash2, CheckCircle, XCircle, Upload, FileSpreadsheet } from 'lucide-react';
+import {
+  Search,
+  Plus,
+  Edit2,
+  Trash2,
+  CheckCircle,
+  XCircle,
+  Upload,
+  FileSpreadsheet,
+  Layers,
+  Building,
+  RefreshCw,
+  AlertTriangle,
+  Sparkles,
+} from 'lucide-react';
 
 export const RoomManagement: React.FC = () => {
   const [rooms, setRooms] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [search, setSearch] = useState('');
-  const [building, setBuilding] = useState('');
+  const [selectedBlock, setSelectedBlock] = useState<string>('');
+  const [selectedFloor, setSelectedFloor] = useState<string>('');
+  const [activeFilter, setActiveFilter] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
-  // Modal
+  // Diagnostics
+  const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(true);
+
+  // Single Room Modal (Add / Edit)
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingRoom, setEditingRoom] = useState<any>(null);
 
-  // Room Import states
+  // Bulk Generation Modal
+  const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
+  const [bulkBlock, setBulkBlock] = useState('Block A');
+  const [bulkFloor, setBulkFloor] = useState(1);
+  const [bulkCount, setBulkCount] = useState(25);
+  const [bulkPrefix, setBulkPrefix] = useState('A');
+  const [bulkStartNum, setBulkStartNum] = useState(1);
+  const [bulkCapacity, setBulkCapacity] = useState(30);
+  const [bulkPreview, setBulkPreview] = useState<any>(null);
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkSuccess, setBulkSuccess] = useState<string | null>(null);
+
+  // Room Import states (CSV / XLSX)
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importPreview, setImportPreview] = useState<any>(null);
@@ -24,17 +57,29 @@ export const RoomManagement: React.FC = () => {
   const [importError, setImportError] = useState<string | null>(null);
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
 
-  const buildings = [
-    'Block A (Science)',
-    'Block B (Computing)',
-    'Block C (Engineering)',
-    'Block D (Management)',
-  ];
+  const standardBlocks = ['Block A', 'Block B', 'Block C'];
+
+  async function loadDiagnostics() {
+    try {
+      const res = await api.getRoomDiagnostics();
+      if (res.success && res.data) {
+        setDiagnostics(res.data);
+      }
+    } catch (err) {
+      console.warn('Diagnostics unavailable:', err);
+    }
+  }
 
   async function loadRooms() {
     try {
       setLoading(true);
-      const res = await api.getRooms({ search, building: building || undefined, limit: 100 });
+      const res = await api.getRooms({
+        search: search || undefined,
+        building: selectedBlock || undefined,
+        floor: selectedFloor !== '' ? Number(selectedFloor) : undefined,
+        active: activeFilter === 'active' ? true : activeFilter === 'inactive' ? false : undefined,
+        limit: 200,
+      });
       setRooms(res.data);
       setTotal(res.total);
     } catch (err) {
@@ -46,7 +91,16 @@ export const RoomManagement: React.FC = () => {
 
   useEffect(() => {
     loadRooms();
-  }, [search, building]);
+    loadDiagnostics();
+  }, [search, selectedBlock, selectedFloor, activeFilter]);
+
+  // Sync prefix when bulk block changes
+  useEffect(() => {
+    if (bulkBlock.includes('Block A')) setBulkPrefix('A');
+    else if (bulkBlock.includes('Block B')) setBulkPrefix('B');
+    else if (bulkBlock.includes('Block C')) setBulkPrefix('C');
+    else setBulkPrefix(bulkBlock.substring(0, 1).toUpperCase());
+  }, [bulkBlock]);
 
   async function handleSaveRoom(e: React.FormEvent) {
     e.preventDefault();
@@ -54,12 +108,15 @@ export const RoomManagement: React.FC = () => {
       if (editingRoom.id && editingRoom.isNew !== true) {
         await api.updateRoom(editingRoom.id, editingRoom);
       } else {
-        await api.createRoom(editingRoom);
+        const payload = { ...editingRoom };
+        delete payload.isNew;
+        await api.createRoom(payload);
       }
       setIsModalOpen(false);
       loadRooms();
-    } catch (err) {
-      alert('Failed to save room: ' + (err as Error).message);
+      loadDiagnostics();
+    } catch (err: any) {
+      alert('Failed to save room: ' + (err.message || String(err)));
     }
   }
 
@@ -68,11 +125,92 @@ export const RoomManagement: React.FC = () => {
     try {
       await api.deleteRoom(id);
       loadRooms();
-    } catch (err) {
-      alert('Failed to delete room: ' + (err as Error).message);
+      loadDiagnostics();
+    } catch (err: any) {
+      if (err.status === 409 || err.conflict || err.message?.includes('assigned to active duties') || err.message?.includes('referenced by approved schedules')) {
+        const shouldDeactivate = confirm(
+          `Cannot delete room ${id}: ${err.message}\n\nWould you like to safely DEACTIVATE this room instead? This preserves historical examination records.`
+        );
+        if (shouldDeactivate) {
+          try {
+            await api.deactivateRoom(id);
+            alert(`Room ${id} has been deactivated.`);
+            loadRooms();
+            loadDiagnostics();
+          } catch (deactErr: any) {
+            alert('Failed to deactivate room: ' + deactErr.message);
+          }
+        }
+      } else {
+        alert('Failed to delete room: ' + (err as Error).message);
+      }
     }
   }
 
+  async function handleToggleRoomActive(room: any) {
+    try {
+      if (room.active) {
+        await api.deactivateRoom(room.id);
+      } else {
+        await api.updateRoom(room.id, { active: true });
+      }
+      loadRooms();
+      loadDiagnostics();
+    } catch (err: any) {
+      alert(`Failed to update status for ${room.id}: ` + err.message);
+    }
+  }
+
+  // Bulk Generation Handlers
+  async function handlePreviewBulkGeneration() {
+    setBulkLoading(true);
+    setBulkError(null);
+    setBulkSuccess(null);
+    try {
+      const res = await api.bulkGenerateRoomsPreview({
+        block: bulkBlock,
+        floor: Number(bulkFloor),
+        count: Number(bulkCount),
+        prefix: bulkPrefix.trim(),
+      });
+      setBulkPreview(res.data);
+    } catch (err: any) {
+      setBulkError(err.message || 'Failed to preview bulk room generation.');
+      setBulkPreview(null);
+    } finally {
+      setBulkLoading(false);
+    }
+  }
+
+  async function handleCommitBulkGeneration() {
+    if (!bulkPreview || !bulkPreview.proposedRooms) return;
+    setBulkLoading(true);
+    setBulkError(null);
+    try {
+      const res = await api.bulkGenerateRoomsCommit({
+        block: bulkPreview.block,
+        floor: bulkPreview.floor,
+        rooms: bulkPreview.proposedRooms,
+      });
+      const data = res.data;
+      setBulkSuccess(
+        `Successfully generated ${data.createdCount} room(s) for ${bulkPreview.block} Floor ${bulkPreview.floor}. (Skipped ${data.skippedCount} existing rooms).`
+      );
+      loadRooms();
+      loadDiagnostics();
+      setTimeout(() => {
+        setIsBulkModalOpen(false);
+        setBulkPreview(null);
+        setBulkSuccess(null);
+      }, 2000);
+    } catch (err: any) {
+      setBulkError(err.message || 'Bulk room generation commit failed.');
+    } finally {
+      setBulkLoading(false);
+    }
+  }
+
+  // Import Handlers
   async function handleRoomFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -142,6 +280,7 @@ export const RoomManagement: React.FC = () => {
       });
       setImportSuccess(`Successfully committed batch import: ${res.imported} new rooms, ${res.updated} updated.`);
       loadRooms();
+      loadDiagnostics();
       setTimeout(() => {
         setIsImportModalOpen(false);
         handleResetImport();
@@ -162,14 +301,38 @@ export const RoomManagement: React.FC = () => {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+      {/* Page Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
-          <h1>Room Management</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>
-            Examination halls, seating capacities, blocks & active status
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <Building size={28} color="var(--primary-forest)" />
+            College Room Management
+          </h1>
+          <p style={{ color: 'var(--text-secondary)', marginTop: '4px' }}>
+            Hierarchical management (Block → Floor → Room), 25 rooms/floor default, bulk generation and diagnostics
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setShowDiagnostics(!showDiagnostics)}
+            className="btn btn-secondary"
+            title="Toggle room hierarchy diagnostics"
+          >
+            <Layers size={16} /> Diagnostics
+          </button>
+          <button
+            onClick={() => {
+              setBulkPreview(null);
+              setBulkError(null);
+              setBulkSuccess(null);
+              setIsBulkModalOpen(true);
+            }}
+            className="btn btn-secondary"
+            style={{ borderColor: 'var(--primary-forest)', color: 'var(--primary-forest)' }}
+            title="Bulk generate 25 rooms for a block & floor"
+          >
+            <Sparkles size={16} /> Bulk Generate 25 Rooms
+          </button>
           <button
             onClick={() => {
               handleResetImport();
@@ -178,27 +341,113 @@ export const RoomManagement: React.FC = () => {
             className="btn btn-secondary"
             title="Import rooms from CSV or Excel file"
           >
-            <Upload size={16} /> Import Rooms
+            <Upload size={16} /> Import File
           </button>
           <button
             onClick={() => {
-              setEditingRoom({ isNew: true, name: '', building: buildings[0], floor: 1, capacity: 40, active: true });
+              setEditingRoom({
+                isNew: true,
+                id: '',
+                name: '',
+                building: selectedBlock || standardBlocks[0],
+                floor: selectedFloor ? Number(selectedFloor) : 1,
+                capacity: 30,
+                active: true,
+              });
               setIsModalOpen(true);
             }}
             className="btn btn-primary"
           >
-            <Plus size={16} /> Add Examination Room
+            <Plus size={16} /> Add Single Room
           </button>
         </div>
       </div>
 
+      {/* Diagnostics Banner */}
+      {showDiagnostics && diagnostics && (
+        <div
+          className="card"
+          style={{
+            padding: '16px 20px',
+            marginBottom: '20px',
+            backgroundColor: 'var(--surface-card)',
+            border: '1px solid var(--border-subtle)',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 600, color: 'var(--primary-forest)' }}>
+              <Layers size={18} />
+              <span>Room Hierarchy Diagnostics (Block A, B, C — 25 rooms/floor standard)</span>
+            </div>
+            <div style={{ display: 'flex', gap: '12px', fontSize: '0.85rem' }}>
+              <span>Expected Total: <strong>{diagnostics.totalExpectedRooms}</strong></span>
+              <span>Registered Total: <strong>{diagnostics.totalRegisteredRooms}</strong></span>
+              <span>Active Total: <strong style={{ color: 'var(--success)' }}>{diagnostics.totalActiveRooms}</strong></span>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+            {diagnostics.blocks?.map((blockName: string) => {
+              const blockRooms = rooms.filter((r) => r.building?.toLowerCase().includes(blockName.toLowerCase()));
+              const activeCount = blockRooms.filter((r) => r.active).length;
+              return (
+                <div
+                  key={blockName}
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    backgroundColor: selectedBlock === blockName ? 'var(--primary-forest-subtle)' : 'var(--canvas-bg)',
+                    border: '1px solid var(--border-subtle)',
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => setSelectedBlock(selectedBlock === blockName ? '' : blockName)}
+                  title={`Click to filter by ${blockName}`}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <strong style={{ color: 'var(--text-main)', fontSize: '0.9rem' }}>{blockName}</strong>
+                    <Badge variant={activeCount > 0 ? 'success' : 'sage'}>
+                      {activeCount} Active
+                    </Badge>
+                  </div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                    <span>Registered: <strong>{blockRooms.length}</strong></span>
+                    <span style={{ marginLeft: '10px' }}>Target: <strong>100</strong> (4×25)</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Block Tabs & Filter Controls */}
       <div className="card" style={{ padding: '16px 20px', marginBottom: '20px' }}>
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-          <div style={{ position: 'relative', flex: 1 }}>
+        {/* Block Selector Tabs */}
+        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '12px', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setSelectedBlock('')}
+            className={`btn btn-sm ${selectedBlock === '' ? 'btn-primary' : 'btn-secondary'}`}
+          >
+            All Blocks
+          </button>
+          {standardBlocks.map((b) => (
+            <button
+              key={b}
+              onClick={() => setSelectedBlock(selectedBlock === b ? '' : b)}
+              className={`btn btn-sm ${selectedBlock === b ? 'btn-primary' : 'btn-secondary'}`}
+            >
+              {b}
+            </button>
+          ))}
+        </div>
+
+        {/* Search, Floor & Status Filters */}
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: '12px', alignItems: 'center' }}>
+          <div style={{ position: 'relative' }}>
             <Search size={18} color="var(--text-muted)" style={{ position: 'absolute', left: '12px', top: '10px' }} />
             <input
               type="text"
-              placeholder="Search by Room ID, name, building..."
+              placeholder="Search by Room ID, name (e.g. A-101), block..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="form-input"
@@ -207,29 +456,53 @@ export const RoomManagement: React.FC = () => {
           </div>
 
           <select
-            value={building}
-            onChange={(e) => setBuilding(e.target.value)}
+            value={selectedFloor}
+            onChange={(e) => setSelectedFloor(e.target.value)}
             className="form-select"
-            style={{ width: '260px' }}
           >
-            <option value="">All Buildings / Blocks</option>
-            {buildings.map((b) => (
-              <option key={b} value={b}>{b}</option>
-            ))}
+            <option value="">All Floors</option>
+            <option value="1">Floor 1 (101–125)</option>
+            <option value="2">Floor 2 (201–225)</option>
+            <option value="3">Floor 3 (301–325)</option>
+            <option value="4">Floor 4 (401–425)</option>
           </select>
+
+          <select
+            value={activeFilter}
+            onChange={(e) => setActiveFilter(e.target.value)}
+            className="form-select"
+          >
+            <option value="">All Statuses</option>
+            <option value="active">Active Only</option>
+            <option value="inactive">Inactive Only</option>
+          </select>
+
+          <button
+            onClick={() => {
+              setSearch('');
+              setSelectedBlock('');
+              setSelectedFloor('');
+              setActiveFilter('');
+            }}
+            className="btn btn-secondary btn-sm"
+            title="Reset filters"
+          >
+            <RefreshCw size={14} /> Reset
+          </button>
         </div>
       </div>
 
+      {/* Rooms Table */}
       <div className="table-container">
         <table className="data-table">
           <thead>
             <tr>
               <th>Room ID</th>
-              <th>Venue Name</th>
-              <th>Building / Block</th>
+              <th>Room Number / Label</th>
+              <th>Block / Building</th>
               <th>Floor</th>
-              <th>Exam Dept (H6)</th>
               <th>Student Capacity</th>
+              <th>Dept Exclusion (H6)</th>
               <th>Active Status</th>
               <th style={{ textAlign: 'right' }}>Actions</th>
             </tr>
@@ -238,51 +511,76 @@ export const RoomManagement: React.FC = () => {
             {loading ? (
               <tr>
                 <td colSpan={8} style={{ textAlign: 'center', padding: '32px' }}>
-                  Loading rooms...
+                  Loading examination rooms...
                 </td>
               </tr>
             ) : rooms.length === 0 ? (
               <tr>
-                <td colSpan={8} style={{ textAlign: 'center', padding: '32px', color: 'var(--text-muted)' }}>
-                  No rooms found matching filters.
+                <td colSpan={8} style={{ textAlign: 'center', padding: '36px', color: 'var(--text-muted)' }}>
+                  <div style={{ marginBottom: '8px', fontSize: '1rem' }}>No examination rooms found.</div>
+                  <div style={{ fontSize: '0.85rem' }}>
+                    Tip: Use <strong>"Bulk Generate 25 Rooms"</strong> above to quickly instantiate rooms for a block and floor.
+                  </div>
                 </td>
               </tr>
             ) : (
               rooms.map((r) => (
                 <tr key={r.id}>
-                  <td><span className="room-id">{r.id}</span></td>
-                  <td><strong>{r.name}</strong></td>
-                  <td>{r.building}</td>
+                  <td>
+                    <span className="mono-metric" style={{ fontWeight: 600 }}>{r.id}</span>
+                  </td>
+                  <td>
+                    <strong style={{ fontSize: '0.95rem' }}>{r.name}</strong>
+                  </td>
+                  <td>
+                    <Badge variant="sage">{r.building}</Badge>
+                  </td>
                   <td>Floor {r.floor}</td>
+                  <td>
+                    <span className="mono-metric">{r.capacity} seats</span>
+                  </td>
                   <td>
                     {r.examDepartment ? (
                       <Badge variant="sage">{r.examDepartment}</Badge>
                     ) : (
-                      <span style={{ color: 'var(--text-muted)' }}>None</span>
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>None</span>
                     )}
                   </td>
-                  <td><span className="mono-metric">{r.capacity} seats</span></td>
                   <td>
                     {r.active ? (
-                      <Badge variant="success"><CheckCircle size={12} /> Active</Badge>
+                      <Badge variant="success">
+                        <CheckCircle size={12} /> Active
+                      </Badge>
                     ) : (
-                      <Badge variant="error"><XCircle size={12} /> Inactive</Badge>
+                      <Badge variant="error">
+                        <XCircle size={12} /> Inactive
+                      </Badge>
                     )}
                   </td>
                   <td style={{ textAlign: 'right' }}>
                     <div style={{ display: 'inline-flex', gap: '6px' }}>
+                      <button
+                        onClick={() => handleToggleRoomActive(r)}
+                        className={`btn btn-sm ${r.active ? 'btn-secondary' : 'btn-primary'}`}
+                        title={r.active ? 'Deactivate room' : 'Activate room'}
+                        style={{ fontSize: '0.75rem', padding: '4px 8px' }}
+                      >
+                        {r.active ? 'Deactivate' : 'Activate'}
+                      </button>
                       <button
                         onClick={() => {
                           setEditingRoom({ ...r });
                           setIsModalOpen(true);
                         }}
                         className="btn btn-secondary btn-sm"
+                        title="Edit Room"
                       >
                         <Edit2 size={14} />
                       </button>
                       <button
                         onClick={() => handleDeleteRoom(r.id)}
                         className="btn btn-danger btn-sm"
+                        title="Delete Room"
                       >
                         <Trash2 size={14} />
                       </button>
@@ -295,25 +593,206 @@ export const RoomManagement: React.FC = () => {
         </table>
       </div>
 
-      <div style={{ marginTop: '12px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-        Showing {rooms.length} of {total} registered examination rooms
+      <div style={{ marginTop: '12px', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between' }}>
+        <span>Showing {rooms.length} of {total} registered examination rooms</span>
+        <span>Standard: 25 rooms per floor across Blocks A, B, C</span>
       </div>
 
-      {/* Modal */}
+      {/* Bulk Room Generation Modal */}
+      {isBulkModalOpen && (
+        <Modal
+          isOpen={true}
+          onClose={() => {
+            setIsBulkModalOpen(false);
+            setBulkPreview(null);
+          }}
+          title="Bulk Generate Examination Rooms by Block & Floor"
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+              Standard institutional configuration defaults to <strong>25 rooms per floor</strong> (e.g. A-101 to A-125).
+              Review the proposed room labels below before confirming. Existing rooms will be safely skipped to prevent duplicates.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+              <div className="form-group">
+                <label className="form-label">Target Block</label>
+                <select
+                  value={bulkBlock}
+                  onChange={(e) => setBulkBlock(e.target.value)}
+                  className="form-select"
+                >
+                  <option value="Block A">Block A</option>
+                  <option value="Block B">Block B</option>
+                  <option value="Block C">Block C</option>
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Target Floor</label>
+                <select
+                  value={bulkFloor}
+                  onChange={(e) => setBulkFloor(Number(e.target.value))}
+                  className="form-select"
+                >
+                  <option value={1}>Floor 1</option>
+                  <option value={2}>Floor 2</option>
+                  <option value={3}>Floor 3</option>
+                  <option value={4}>Floor 4</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+              <div className="form-group">
+                <label className="form-label">Rooms per Floor</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={bulkCount}
+                  onChange={(e) => setBulkCount(Number(e.target.value))}
+                  className="form-input"
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Room Prefix / Letter</label>
+                <input
+                  type="text"
+                  value={bulkPrefix}
+                  onChange={(e) => setBulkPrefix(e.target.value)}
+                  className="form-input"
+                  placeholder="e.g. A"
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Default Capacity</label>
+                <input
+                  type="number"
+                  min="10"
+                  max="200"
+                  value={bulkCapacity}
+                  onChange={(e) => setBulkCapacity(Number(e.target.value))}
+                  className="form-input"
+                />
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+              <button
+                type="button"
+                onClick={handlePreviewBulkGeneration}
+                className="btn btn-secondary"
+                disabled={bulkLoading}
+              >
+                <Sparkles size={16} /> Preview Proposed {bulkCount} Rooms
+              </button>
+            </div>
+
+            {bulkError && (
+              <div style={{ padding: '10px 14px', backgroundColor: 'var(--error-bg)', color: 'var(--error)', borderRadius: 'var(--radius-md)', border: '1px solid var(--error-border)', fontSize: '0.85rem' }}>
+                <div style={{ fontWeight: 600 }}>Error:</div>
+                {bulkError}
+              </div>
+            )}
+
+            {bulkSuccess && (
+              <div style={{ padding: '10px 14px', backgroundColor: 'var(--success-bg)', color: 'var(--success)', borderRadius: 'var(--radius-md)', border: '1px solid var(--success-border)', fontSize: '0.85rem' }}>
+                {bulkSuccess}
+              </div>
+            )}
+
+            {/* Proposed Rooms Grid Preview */}
+            {bulkPreview && (
+              <div style={{ marginTop: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Proposed Batch:</span>
+                    <Badge variant="forest">Total: {bulkPreview.totalProposed}</Badge>
+                    <Badge variant="success">New: {bulkPreview.newCount}</Badge>
+                    {bulkPreview.alreadyExistsCount > 0 && (
+                      <Badge variant="warning">Already Exists (Will Skip): {bulkPreview.alreadyExistsCount}</Badge>
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    maxHeight: '200px',
+                    overflowY: 'auto',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '8px',
+                    backgroundColor: 'var(--canvas-bg)',
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))',
+                    gap: '6px',
+                  }}
+                >
+                  {bulkPreview.proposedRooms?.map((r: any) => (
+                    <div
+                      key={r.id}
+                      style={{
+                        padding: '6px 8px',
+                        borderRadius: 'var(--radius-sm)',
+                        backgroundColor: r.alreadyExists ? 'var(--warning-bg)' : 'var(--surface-card)',
+                        border: `1px solid ${r.alreadyExists ? 'var(--warning-border)' : 'var(--border-subtle)'}`,
+                        fontSize: '0.8rem',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <strong>{r.name}</strong>
+                      {r.alreadyExists ? (
+                        <span style={{ fontSize: '0.7rem', color: 'var(--warning)', fontWeight: 600 }}>Exists</span>
+                      ) : (
+                        <span style={{ fontSize: '0.7rem', color: 'var(--success)', fontWeight: 600 }}>+ New</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="modal-footer" style={{ marginTop: '16px' }}>
+                  <button
+                    type="button"
+                    onClick={() => setIsBulkModalOpen(false)}
+                    className="btn btn-secondary"
+                    disabled={bulkLoading}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCommitBulkGeneration}
+                    className="btn btn-primary"
+                    disabled={bulkLoading || bulkPreview.newCount === 0}
+                  >
+                    {bulkLoading ? 'Generating...' : `Confirm & Create ${bulkPreview.newCount} Rooms`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {/* Single Room Add / Edit Modal */}
       <Modal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        title={editingRoom?.isNew ? 'Configure New Room' : `Edit Room: ${editingRoom?.id}`}
+        title={editingRoom?.isNew ? 'Configure New Examination Room' : `Edit Room: ${editingRoom?.id}`}
       >
         {editingRoom && (
           <form onSubmit={handleSaveRoom}>
             <div className="form-group">
-              <label className="form-label">Room Identifier / Code</label>
+              <label className="form-label">Room Identifier / Code (Leave blank to auto-generate)</label>
               <input
                 type="text"
-                required
                 disabled={!editingRoom.isNew}
-                placeholder="e.g. RM-201"
+                placeholder="e.g. RM-BlockA-F1-101"
                 value={editingRoom.id || ''}
                 onChange={(e) => setEditingRoom({ ...editingRoom, id: e.target.value })}
                 className="form-input"
@@ -321,11 +800,11 @@ export const RoomManagement: React.FC = () => {
             </div>
 
             <div className="form-group">
-              <label className="form-label">Venue Display Name</label>
+              <label className="form-label">Room Number / Venue Label</label>
               <input
                 type="text"
                 required
-                placeholder="e.g. Hall RM-201 (Block B)"
+                placeholder="e.g. A-101"
                 value={editingRoom.name || ''}
                 onChange={(e) => setEditingRoom({ ...editingRoom, name: e.target.value })}
                 className="form-input"
@@ -339,7 +818,7 @@ export const RoomManagement: React.FC = () => {
                 onChange={(e) => setEditingRoom({ ...editingRoom, building: e.target.value })}
                 className="form-select"
               >
-                {buildings.map((b) => (
+                {standardBlocks.map((b) => (
                   <option key={b} value={b}>{b}</option>
                 ))}
               </select>
@@ -416,7 +895,6 @@ export const RoomManagement: React.FC = () => {
           title="Import Examination Rooms (CSV / Excel)"
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxHeight: '75vh', overflowY: 'auto' }}>
-            {/* File Selector */}
             {!importPreview && (
               <div>
                 <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '12px' }}>
@@ -470,10 +948,8 @@ export const RoomManagement: React.FC = () => {
               </div>
             )}
 
-            {/* Validation Preview Table */}
             {importPreview && (
               <div>
-                {/* Summary badges */}
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap' }}>
                   <span style={{ fontSize: '0.85rem', fontWeight: 600 }}>Validation Summary:</span>
                   <Badge variant="forest">Total: {importPreview.totalRows}</Badge>
@@ -493,13 +969,6 @@ export const RoomManagement: React.FC = () => {
                   </label>
                 </div>
 
-                {importPreview.errorRows > 0 && (
-                  <div style={{ padding: '8px 12px', backgroundColor: 'var(--error-bg)', color: 'var(--error)', borderRadius: '4px', fontSize: '0.8rem', marginBottom: '12px' }}>
-                    File contains row-level errors. Please correct the source file and re-upload before committing.
-                  </div>
-                )}
-
-                {/* Rows Table */}
                 <div style={{ maxHeight: '280px', overflowY: 'auto', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
                   <table className="data-table" style={{ width: '100%', fontSize: '0.8rem' }}>
                     <thead>
@@ -551,7 +1020,6 @@ export const RoomManagement: React.FC = () => {
                   </table>
                 </div>
 
-                {/* Actions */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '16px' }}>
                   <button onClick={handleResetImport} className="btn btn-secondary btn-sm" disabled={importLoading}>
                     Select Another File

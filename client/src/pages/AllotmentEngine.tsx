@@ -13,6 +13,8 @@ import {
   Check,
   Globe,
   Clock,
+  UserCheck,
+  ShieldAlert,
 } from 'lucide-react';
 
 export const AllotmentEngine: React.FC = () => {
@@ -24,6 +26,7 @@ export const AllotmentEngine: React.FC = () => {
   const [generationLoading, setGenerationLoading] = useState(false);
   const [failureDiagnostics, setFailureDiagnostics] = useState<any>(null);
   const [seedInput, setSeedInput] = useState<string>('');
+  const [requireDualRole, setRequireDualRole] = useState<boolean>(true);
 
   // Filters for Matrix
   const [selectedDate, setSelectedDate] = useState<string>('');
@@ -33,6 +36,7 @@ export const AllotmentEngine: React.FC = () => {
   // Reassignment Modal
   const [isReassignModalOpen, setIsReassignModalOpen] = useState(false);
   const [targetAssignment, setTargetAssignment] = useState<any>(null);
+  const [reassignRoleTarget, setReassignRoleTarget] = useState<'INVIGILATOR' | 'FRISKING'>('INVIGILATOR');
   const [candidateFacultyId, setCandidateFacultyId] = useState('');
   const [reassignReason, setReassignReason] = useState('');
   const [reassignError, setReassignError] = useState<string | null>(null);
@@ -50,7 +54,7 @@ export const AllotmentEngine: React.FC = () => {
       if (examRes.data.length > 0) {
         const firstExamId = examRes.data[0].id;
         setSelectedExamId(firstExamId);
-        await inspectExam(firstExamId);
+        await inspectExam(firstExamId, undefined, requireDualRole);
       }
       const facRes = await api.getFaculty({ limit: 500 });
       setAllFaculty(facRes.data);
@@ -63,11 +67,11 @@ export const AllotmentEngine: React.FC = () => {
     loadData();
   }, []);
 
-  async function inspectExam(examId: string, targetScheduleId?: string) {
+  async function inspectExam(examId: string, targetScheduleId?: string, dualRole = requireDualRole) {
     setSelectedExamId(examId);
     setFailureDiagnostics(null);
     try {
-      const pf = await api.getPreflight(examId);
+      const pf = await api.getPreflight(examId, dualRole);
       setPreflight(pf.data);
 
       try {
@@ -97,18 +101,27 @@ export const AllotmentEngine: React.FC = () => {
     }
   }
 
+  async function handleToggleDualRole(checked: boolean) {
+    setRequireDualRole(checked);
+    if (selectedExamId) {
+      await inspectExam(selectedExamId, schedule?.id, checked);
+    }
+  }
+
   async function handleGenerate() {
     if (!selectedExamId) return;
     setGenerationLoading(true);
     setFailureDiagnostics(null);
     try {
       const parsedSeed = seedInput.trim() !== '' ? parseInt(seedInput.trim(), 10) : undefined;
-      const res = await api.generateAllotment(selectedExamId, parsedSeed);
+      const res = await api.generateAllotment(selectedExamId, parsedSeed, requireDualRole);
       setSchedule(res.data);
       if (res.data.assignments.length > 0) {
         setSelectedDate(res.data.assignments[0].date);
       }
-      alert(`Allotment generated and validated successfully in DRAFT state! (Seed: ${res.data.seed ?? 'N/A'})`);
+      alert(
+        `Allotment generated and validated successfully in DRAFT state! (Dual-Role: ${requireDualRole ? 'Enforced (2 Staff/Room)' : 'Standard'}, Seed: ${res.data.seed ?? 'N/A'})`
+      );
       const listRes = await api.listSchedules(selectedExamId);
       setAllSchedules(listRes.data || []);
     } catch (err: any) {
@@ -168,8 +181,9 @@ export const AllotmentEngine: React.FC = () => {
     }
   }
 
-  function openReassignModal(asgn: any) {
+  function openReassignModal(asgn: any, role: 'INVIGILATOR' | 'FRISKING' = 'INVIGILATOR') {
     setTargetAssignment(asgn);
+    setReassignRoleTarget(role);
     setCandidateFacultyId('');
     setReassignReason('');
     setReassignError(null);
@@ -187,6 +201,15 @@ export const AllotmentEngine: React.FC = () => {
       return;
     }
 
+    // Client-side distinctness check: Invigilator and Frisking teacher cannot be the same person
+    const otherFacultyId = reassignRoleTarget === 'INVIGILATOR' ? targetAssignment.frisking_faculty_id : targetAssignment.faculty_id;
+    if (otherFacultyId && candidateFacultyId === otherFacultyId) {
+      setReassignError(
+        `Dual-Role Distinctness Violation: The same faculty member cannot serve as both Invigilator and Frisking Teacher for the same room and session.`
+      );
+      return;
+    }
+
     setReassignError(null);
     setReassignViolations([]);
     setIsConflictError(false);
@@ -197,6 +220,7 @@ export const AllotmentEngine: React.FC = () => {
         newFacultyId: candidateFacultyId,
         reason: reassignReason.trim(),
         expectedCounter: schedule.counter,
+        roleTarget: reassignRoleTarget,
       });
 
       setIsReassignModalOpen(false);
@@ -204,14 +228,18 @@ export const AllotmentEngine: React.FC = () => {
       await inspectExam(selectedExamId, targetId);
 
       if (res.isRevision) {
-        alert(`Revision created successfully as ${res.revisionScheduleId} with full domain revalidation! Base approved version remains immutable.`);
+        alert(
+          `Revision created successfully as ${res.revisionScheduleId} with authoritative domain revalidation! Base approved version remains immutable.`
+        );
       } else {
-        alert('Teacher reassigned successfully with full domain revalidation.');
+        alert(`${reassignRoleTarget === 'INVIGILATOR' ? 'Invigilator' : 'Frisking Teacher'} reassigned successfully with full domain revalidation.`);
       }
     } catch (err: any) {
       if (err.conflict) {
         setIsConflictError(true);
-        setReassignError(`Concurrency Conflict: Schedule counter #${schedule.counter} is stale. Another transaction has modified the schedule. Please refresh.`);
+        setReassignError(
+          `Concurrency Conflict: Schedule counter #${schedule.counter} is stale. Another transaction has modified the schedule. Please refresh.`
+        );
       } else {
         setReassignError(err.message || 'Reassignment rejected by domain validator.');
       }
@@ -222,25 +250,28 @@ export const AllotmentEngine: React.FC = () => {
   }
 
   // Filter assignments for current view
-  const currentAssignments = schedule?.assignments?.filter((a: any) => {
-    if (selectedDate && a.date !== selectedDate) return false;
-    if (selectedSession && a.session !== selectedSession) return false;
-    if (searchFilter) {
-      const s = searchFilter.toLowerCase();
-      const matchRoom = a.room_id.toLowerCase().includes(s) || a.room_name?.toLowerCase().includes(s);
-      const matchFaculty =
-        a.faculty_id.toLowerCase().includes(s) ||
-        a.faculty_name?.toLowerCase().includes(s) ||
-        a.department?.toLowerCase().includes(s);
-      return matchRoom || matchFaculty;
-    }
-    return true;
-  }) || [];
+  const currentAssignments =
+    schedule?.assignments?.filter((a: any) => {
+      if (selectedDate && a.date !== selectedDate) return false;
+      if (selectedSession && a.session !== selectedSession) return false;
+      if (searchFilter) {
+        const s = searchFilter.toLowerCase();
+        const matchRoom = a.room_id.toLowerCase().includes(s) || a.room_name?.toLowerCase().includes(s);
+        const matchInvigilator =
+          a.faculty_id?.toLowerCase().includes(s) ||
+          a.faculty_name?.toLowerCase().includes(s) ||
+          a.department?.toLowerCase().includes(s);
+        const matchFrisking =
+          a.frisking_faculty_id?.toLowerCase().includes(s) ||
+          a.frisking_faculty_name?.toLowerCase().includes(s) ||
+          a.frisking_department?.toLowerCase().includes(s);
+        return matchRoom || matchInvigilator || matchFrisking;
+      }
+      return true;
+    }) || [];
 
-  // Extract unique dates from assignments or preflight
-  const availableDates: string[] = Array.from(
-    new Set((schedule?.assignments || []).map((a: any) => a.date))
-  );
+  // Extract unique dates from assignments
+  const availableDates: string[] = Array.from(new Set((schedule?.assignments || []).map((a: any) => a.date)));
 
   // Find session accounting for current date & session
   const currentAccounting = schedule?.validationResult?.sessionAccountings?.find(
@@ -249,15 +280,18 @@ export const AllotmentEngine: React.FC = () => {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
         <div>
-          <h1>Automatic Allotment Engine</h1>
+          <h1 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <Sparkles size={28} color="var(--primary-forest)" />
+            Automatic Allotment Engine
+          </h1>
           <p style={{ color: 'var(--text-secondary)' }}>
-            Mathematical optimization solver, constraint verification & room-wise duty matrix
+            Mathematical optimization solver, dual-role staffing (Invigilator + Frisking), constraint verification & duty matrix
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
           <select
             value={selectedExamId}
             onChange={(e) => inspectExam(e.target.value)}
@@ -265,7 +299,9 @@ export const AllotmentEngine: React.FC = () => {
             style={{ width: '280px' }}
           >
             {exams.map((e) => (
-              <option key={e.id} value={e.id}>{e.name} ({e.academicYear})</option>
+              <option key={e.id} value={e.id}>
+                {e.name} ({e.academicYear})
+              </option>
             ))}
           </select>
 
@@ -275,9 +311,31 @@ export const AllotmentEngine: React.FC = () => {
             value={seedInput}
             onChange={(e) => setSeedInput(e.target.value)}
             className="form-input"
-            style={{ width: '130px', padding: '6px 10px', fontSize: '0.85rem' }}
-            title="Random seed for deterministic tie-breaking (Rule 5)"
+            style={{ width: '120px', padding: '6px 10px', fontSize: '0.85rem' }}
+            title="Random seed for deterministic tie-breaking"
           />
+
+          <label
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              fontSize: '0.85rem',
+              cursor: 'pointer',
+              backgroundColor: 'var(--surface-card)',
+              padding: '6px 10px',
+              borderRadius: 'var(--radius-sm)',
+              border: '1px solid var(--border-subtle)',
+            }}
+            title="Enforce 2 distinct teachers per active room (Invigilator + Frisking Teacher)"
+          >
+            <input
+              type="checkbox"
+              checked={requireDualRole}
+              onChange={(e) => handleToggleDualRole(e.target.checked)}
+            />
+            <span style={{ fontWeight: 600, color: 'var(--primary-forest)' }}>Dual-Role (2 Teachers/Room)</span>
+          </label>
 
           <button
             onClick={handleGenerate}
@@ -292,41 +350,75 @@ export const AllotmentEngine: React.FC = () => {
 
       {/* Pre-flight Capacity & Infeasibility Diagnostics */}
       {failureDiagnostics && (
-        <div className="alert alert-error" style={{ marginBottom: '24px' }}>
-          <AlertTriangle size={28} color="var(--error)" style={{ flexShrink: 0, marginTop: '2px' }} />
+        <div
+          className={failureDiagnostics.isInconclusive ? 'alert alert-warning' : 'alert alert-error'}
+          style={{ marginBottom: '24px' }}
+        >
+          <AlertTriangle
+            size={28}
+            color={failureDiagnostics.isInconclusive ? 'var(--warning)' : 'var(--error)'}
+            style={{ flexShrink: 0, marginTop: '2px' }}
+          />
           <div>
             <div className="alert-title">
-              Allocation Engine Failed: {failureDiagnostics.provenInfeasible ? 'Proven Mathematical Infeasibility' : 'Constraint Exhaustion'}
+              Allocation Engine Shortfall / Failure:{' '}
+              {failureDiagnostics.provenInfeasible
+                ? 'Proven Mathematical Infeasibility'
+                : failureDiagnostics.isInconclusive
+                ? 'Inconclusive Result (Constraint Exhaustion / Search Budget)'
+                : 'Schedule Rule Violation'}
             </div>
             <p style={{ marginTop: '4px', fontSize: '0.875rem' }}>{failureDiagnostics.reason}</p>
+
+            <div style={{ marginTop: '8px', fontSize: '0.825rem', color: 'var(--text-secondary)' }}>
+              {failureDiagnostics.provenInfeasible ? (
+                <span>
+                  <strong>Mathematical Proof:</strong> Staffing demand ({requireDualRole ? 'Rooms × Sessions × 2 roles' : 'Rooms × Sessions × 1 role'}) strictly exceeds available faculty capacity under active sequence rules. A valid schedule cannot exist without an administrative remedy.
+                </span>
+              ) : failureDiagnostics.isInconclusive ? (
+                <span>
+                  <strong>Constraint Exhaustion:</strong> Total teacher capacity is theoretically sufficient, but fine-grained constraints (such as Rule H4 room rotation, Rule H3 rest-day rules, or leave exclusions) created a dead-end preventing complete room coverage.
+                </span>
+              ) : null}
+            </div>
+
             {failureDiagnostics.details && (
               <ul style={{ marginTop: '10px', paddingLeft: '20px', fontSize: '0.85rem' }}>
                 {failureDiagnostics.details.map((d: string, idx: number) => (
-                  <li key={idx} style={{ marginBottom: '4px' }}>{d}</li>
+                  <li key={idx} style={{ marginBottom: '4px' }}>
+                    {d}
+                  </li>
                 ))}
               </ul>
             )}
             {failureDiagnostics.remedies && failureDiagnostics.remedies.length > 0 && (
-              <div style={{ marginTop: '12px', padding: '10px 14px', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--surface-card)', border: '1px solid var(--border-subtle)' }}>
+              <div
+                style={{
+                  marginTop: '12px',
+                  padding: '10px 14px',
+                  borderRadius: 'var(--radius-sm)',
+                  backgroundColor: 'var(--surface-card)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
                 <div style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-main)', marginBottom: '4px' }}>
                   Documented Infeasibility Remedies:
                 </div>
                 <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                   {failureDiagnostics.remedies.map((rem: string, idx: number) => (
-                    <li key={idx} style={{ marginBottom: '2px' }}>{rem}</li>
+                    <li key={idx} style={{ marginBottom: '2px' }}>
+                      {rem}
+                    </li>
                   ))}
                 </ul>
               </div>
             )}
-            <div style={{ marginTop: '12px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-              <em>Notice: The engine never drops hard constraints (Rules A, B, C, D, F) to force an invalid schedule. Existing approved schedules remain safely preserved.</em>
-            </div>
           </div>
         </div>
       )}
 
       {/* Capacity & Schedule State Card */}
-      <div className="card">
+      <div className="card" style={{ marginBottom: '20px' }}>
         <div className="card-header">
           <div className="card-title">Schedule Status & Pre-Flight Capacity Analysis</div>
           {schedule && (
@@ -381,32 +473,78 @@ export const AllotmentEngine: React.FC = () => {
           )}
         </div>
 
+        {/* Expected vs Registered Capacity Comparison Bar */}
+        <div style={{ marginBottom: '16px', padding: '12px 16px', backgroundColor: 'var(--canvas-bg)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', fontSize: '0.85rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <strong>Timetable Source:</strong>
+              {preflight?.diagnosticDetails?.timetableConfirmed ? (
+                <Badge variant="success">
+                  Confirmed ({preflight.diagnosticDetails.timetableRecordsCount} exams, {preflight.diagnosticDetails.timetableSessionsCount} shifts)
+                </Badge>
+              ) : (
+                <Badge variant="sage">Default Cartesian Mode</Badge>
+              )}
+              {requireDualRole && (
+                <Badge variant="forest">Dual-Role Invigilation (2 Staff/Room)</Badge>
+              )}
+              {preflight?.isFeasible ? (
+                <Badge variant="success">Preflight: Feasible</Badge>
+              ) : (
+                <Badge variant="error">Preflight: Infeasible (Deficit: {preflight?.deficit})</Badge>
+              )}
+            </div>
+
+            <div>
+              <strong>Active Rooms:</strong>{' '}
+              <span className="mono-metric">{preflight?.diagnosticDetails?.registeredRoomsActive ?? preflight?.diagnosticDetails?.roomCount ?? 0}</span>
+            </div>
+
+            <div>
+              <strong>Eligible Teachers:</strong>{' '}
+              <span className="mono-metric" style={{ color: 'var(--primary-forest)' }}>
+                <strong>{preflight?.diagnosticDetails?.eligibleFacultyCount ?? preflight?.diagnosticDetails?.facultyCount ?? 0}</strong>
+              </span>{' '}
+              ({preflight?.diagnosticDetails?.registeredFacultyUnavailable ?? 0} exempt/unavailable)
+            </div>
+
+            <div>
+              <strong>Staffing Demand:</strong>{' '}
+              <span className="mono-metric">
+                {preflight?.totalRequiredSlots || 0} duties ({requireDualRole ? '2 per active room' : '1 per active room'})
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
           <div style={{ padding: '14px', borderRadius: 'var(--radius-md)', backgroundColor: 'var(--surface-muted)' }}>
-            <div className="metric-label">Required Room Slots</div>
+            <div className="metric-label">Staffing Demand (Duties)</div>
             <div className="metric-value" style={{ fontSize: '1.6rem' }}>
               {preflight?.totalRequiredSlots || 0}
             </div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Rooms × Sessions × Dates</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+              {requireDualRole ? 'Rooms × Shifts × 2 Roles' : 'Rooms × Shifts × 1 Role'}
+            </div>
           </div>
 
           <div style={{ padding: '14px', borderRadius: 'var(--radius-md)', backgroundColor: 'var(--surface-muted)' }}>
-            <div className="metric-label">Max Theoretical Capacity</div>
+            <div className="metric-label">Theoretical Faculty Capacity</div>
             <div className="metric-value" style={{ fontSize: '1.6rem', color: preflight?.isFeasible ? 'var(--success)' : 'var(--error)' }}>
               {preflight?.totalPossibleCapacity || 0}
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              Under Rule C ({preflight?.maxWorkingDaysPerTeacher || 0} max days/teacher)
+              Eligible Teachers × {preflight?.diagnosticDetails?.defaultMaxDuties ?? 6} max duties
             </div>
           </div>
 
           <div style={{ padding: '14px', borderRadius: 'var(--radius-md)', backgroundColor: 'var(--surface-muted)' }}>
-            <div className="metric-label">Coverage Status</div>
+            <div className="metric-label">Staffing Coverage</div>
             <div className="metric-value" style={{ fontSize: '1.6rem' }}>
               {schedule ? `${schedule.validationResult?.validation?.coveragePercentage || 100}%` : '0%'}
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              {schedule ? `${schedule.assignments?.length} slots filled` : 'Awaiting generation'}
+              {schedule ? `${schedule.assignments?.length} rooms staffed` : 'Awaiting generation'}
             </div>
           </div>
 
@@ -447,29 +585,16 @@ export const AllotmentEngine: React.FC = () => {
             </div>
           </div>
         </div>
-
-        {!preflight?.isFeasible && preflight?.remedies && preflight.remedies.length > 0 && (
-          <div style={{ marginTop: '20px', padding: '14px 18px', borderRadius: 'var(--radius-md)', backgroundColor: 'var(--surface-muted)', borderLeft: '4px solid var(--warning)' }}>
-            <div style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-main)', marginBottom: '6px' }}>
-              Actionable Capacity Remedies (Stage 1 Section 3 Policy):
-            </div>
-            <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
-              {preflight.remedies.map((rem: string, idx: number) => (
-                <li key={idx} style={{ marginBottom: '4px' }}>{rem}</li>
-              ))}
-            </ul>
-          </div>
-        )}
       </div>
 
       {/* Roster & Assignment Matrix Section */}
       {schedule && (
         <div>
-          {/* Controls Bar: Dates, Sessions, Search & Rule H Breakdown */}
+          {/* Controls Bar */}
           <div className="card" style={{ padding: '16px 20px', marginBottom: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
               {/* Date Selector */}
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
                 <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Date:</span>
                 {availableDates.map((dateStr) => (
                   <button
@@ -501,7 +626,7 @@ export const AllotmentEngine: React.FC = () => {
                 <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '10px', top: '9px' }} />
                 <input
                   type="text"
-                  placeholder="Filter room or teacher..."
+                  placeholder="Filter room, invigilator, frisking..."
                   value={searchFilter}
                   onChange={(e) => setSearchFilter(e.target.value)}
                   className="form-input"
@@ -532,12 +657,6 @@ export const AllotmentEngine: React.FC = () => {
                 Standby Reserves: <strong className="mono-metric" style={{ color: 'var(--sage-muted)' }}>{currentAccounting.breakdown.RESERVED_SUBSTITUTE}</strong>
               </div>
               <div style={{ padding: '6px 12px', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--surface-card)', border: '1px solid var(--border-subtle)' }}>
-                Excluded (Rule B Shift): <strong className="mono-metric">{currentAccounting.breakdown.EXCLUDED_DAILY_SESSION}</strong>
-              </div>
-              <div style={{ padding: '6px 12px', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--surface-card)', border: '1px solid var(--border-subtle)' }}>
-                Excluded (Rule C Consec.): <strong className="mono-metric">{currentAccounting.breakdown.EXCLUDED_CONSECUTIVE_DAY}</strong>
-              </div>
-              <div style={{ padding: '6px 12px', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--surface-card)', border: '1px solid var(--border-subtle)' }}>
                 On Leave: <strong className="mono-metric" style={{ color: 'var(--warning)' }}>{currentAccounting.breakdown.UNAVAILABLE_LEAVE}</strong>
               </div>
               <div style={{ padding: '6px 12px', borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--surface-card)', border: '1px solid var(--border-subtle)' }}>
@@ -546,62 +665,136 @@ export const AllotmentEngine: React.FC = () => {
             </div>
           )}
 
-          {/* Room Allocation Matrix Grid */}
+          {/* Room Allocation Matrix Grid - DUAL-ROLE DISPLAY */}
           <div className="matrix-grid">
             {currentAssignments.length === 0 ? (
               <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '48px 0', color: 'var(--text-muted)' }}>
                 No rooms match the current date, shift, or filter criteria.
               </div>
             ) : (
-              currentAssignments.map((a: any) => (
-                <div key={a.id} className="matrix-room-card">
-                  <div className="matrix-room-header">
-                    <div>
-                      <span className="room-id" style={{ fontSize: '1rem', fontWeight: 700 }}>{a.room_id}</span>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{a.building} (Fl. {a.floor})</div>
-                    </div>
-                    <Badge variant={a.status === 'COMPLETED' ? 'success' : a.status === 'ABSENT' ? 'error' : 'forest'}>
-                      {a.status}
-                    </Badge>
-                  </div>
-
-                  <div className="matrix-assignment">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              currentAssignments.map((a: any) => {
+                const hasBothRoles = a.faculty_id && a.frisking_faculty_id;
+                const isDistinct = a.faculty_id !== a.frisking_faculty_id;
+                return (
+                  <div key={a.id} className="matrix-room-card" style={{ border: !isDistinct ? '1px solid var(--error-border)' : undefined }}>
+                    <div className="matrix-room-header">
                       <div>
-                        <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--primary-forest)' }}>
-                          {a.faculty_name}
-                        </div>
+                        <span className="room-id" style={{ fontSize: '1rem', fontWeight: 700 }}>{a.room_id}</span>
                         <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                          <span className="faculty-id">{a.faculty_id}</span> • {a.department}
+                          {a.building} (Fl. {a.floor}) {a.room_name && a.room_name !== a.room_id ? `• ${a.room_name}` : ''}
                         </div>
                       </div>
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        {hasBothRoles && isDistinct ? (
+                          <Badge variant="success">Dual-Staffed</Badge>
+                        ) : !isDistinct ? (
+                          <Badge variant="error">Clash: Same Teacher</Badge>
+                        ) : (
+                          <Badge variant="forest">{a.status}</Badge>
+                        )}
+                      </div>
+                    </div>
 
-                      {schedule.state !== 'PUBLISHED' && (
-                        <button
-                          onClick={() => openReassignModal(a)}
-                          className="btn btn-secondary btn-sm"
-                          style={{ padding: '4px 6px' }}
-                          title="Reassign Teacher (Validates Constraints)"
-                        >
-                          <Edit3 size={12} />
-                        </button>
-                      )}
+                    {/* Invigilator Slot */}
+                    <div
+                      className="matrix-assignment"
+                      style={{
+                        marginBottom: '8px',
+                        padding: '10px 12px',
+                        borderRadius: 'var(--radius-sm)',
+                        backgroundColor: 'var(--surface-card)',
+                        border: '1px solid var(--border-subtle)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+                            <UserCheck size={14} color="var(--primary-forest)" />
+                            <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--primary-forest)', textTransform: 'uppercase' }}>
+                              Invigilator
+                            </span>
+                          </div>
+                          <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>
+                            {a.faculty_name || 'Unassigned'}
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                            <span className="faculty-id">{a.faculty_id}</span> {a.department ? `• ${a.department}` : ''}
+                          </div>
+                        </div>
+
+                        {schedule.state !== 'PUBLISHED' && (
+                          <button
+                            onClick={() => openReassignModal(a, 'INVIGILATOR')}
+                            className="btn btn-secondary btn-sm"
+                            style={{ padding: '4px 6px', fontSize: '0.75rem' }}
+                            title="Reassign Invigilator"
+                          >
+                            <Edit3 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Frisking Teacher Slot */}
+                    <div
+                      className="matrix-assignment"
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 'var(--radius-sm)',
+                        backgroundColor: a.frisking_faculty_id ? 'var(--canvas-bg)' : 'var(--warning-bg)',
+                        border: `1px solid ${a.frisking_faculty_id ? 'var(--border-subtle)' : 'var(--warning-border)'}`,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+                            <ShieldAlert size={14} color="var(--sage-muted)" />
+                            <span style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--sage-muted)', textTransform: 'uppercase' }}>
+                              Frisking Teacher
+                            </span>
+                          </div>
+                          <div style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text-main)' }}>
+                            {a.frisking_faculty_name || (a.frisking_faculty_id ? a.frisking_faculty_id : 'Pending Assignment')}
+                          </div>
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                            {a.frisking_faculty_id ? (
+                              <span>
+                                <span className="faculty-id">{a.frisking_faculty_id}</span>
+                                {a.frisking_department ? ` • ${a.frisking_department}` : ''}
+                              </span>
+                            ) : (
+                              <span style={{ color: 'var(--warning)', fontStyle: 'italic' }}>Required second teacher</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {schedule.state !== 'PUBLISHED' && (
+                          <button
+                            onClick={() => openReassignModal(a, 'FRISKING')}
+                            className="btn btn-secondary btn-sm"
+                            style={{ padding: '4px 6px', fontSize: '0.75rem' }}
+                            title="Reassign Frisking Teacher"
+                          >
+                            <Edit3 size={12} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
       )}
 
-      {/* Manual Reassignment Modal with Domain Validator & Immutability Notice */}
+      {/* Manual Reassignment Modal with Dual-Role Selection & Distinctness Enforcement */}
       <Modal
         isOpen={isReassignModalOpen}
         onClose={() => setIsReassignModalOpen(false)}
         title={
           schedule?.state === 'APPROVED' || schedule?.state === 'PUBLISHED' || schedule?.state === 'REVISED'
-            ? 'Create Immutable Revision / Reassign Invigilator'
+            ? `Create Immutable Revision / Reassign ${reassignRoleTarget === 'INVIGILATOR' ? 'Invigilator' : 'Frisking Teacher'}`
             : `Manual Reassignment: Room ${targetAssignment?.room_id} (${targetAssignment?.date} - ${targetAssignment?.session})`
         }
       >
@@ -611,19 +804,43 @@ export const AllotmentEngine: React.FC = () => {
               <div className="alert alert-warning" style={{ marginBottom: '14px', fontSize: '0.85rem' }}>
                 <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
                 <div>
-                  <strong>Immutable Approved Schedule:</strong> Modifying this duty creates a distinct 
-                  revision (e.g. V{schedule.version}.{(schedule.revision_number || 0) + 1}) linked to base {schedule.base_schedule_id || schedule.id}.
-                  Original assignments and snapshots remain permanently preserved. A mandatory non-empty reason is required.
+                  <strong>Immutable Approved Schedule:</strong> Modifying this duty creates a distinct revision linked to base{' '}
+                  {schedule.base_schedule_id || schedule.id}. Original assignments remain permanently preserved. A mandatory reason is required.
                 </div>
               </div>
             )}
 
+            {/* Target Role Selector Tabs inside Modal */}
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+              <button
+                type="button"
+                onClick={() => setReassignRoleTarget('INVIGILATOR')}
+                className={`btn btn-sm ${reassignRoleTarget === 'INVIGILATOR' ? 'btn-primary' : 'btn-secondary'}`}
+              >
+                Reassign Invigilator
+              </button>
+              <button
+                type="button"
+                onClick={() => setReassignRoleTarget('FRISKING')}
+                className={`btn btn-sm ${reassignRoleTarget === 'FRISKING' ? 'btn-primary' : 'btn-secondary'}`}
+              >
+                Reassign Frisking Teacher
+              </button>
+            </div>
+
             <div style={{ padding: '12px', backgroundColor: 'var(--surface-muted)', borderRadius: 'var(--radius-md)', marginBottom: '16px', fontSize: '0.85rem' }}>
-              <div>Current Teacher: <strong>{targetAssignment.faculty_name}</strong> (<span className="faculty-id">{targetAssignment.faculty_id}</span>)</div>
               <div>Room: <strong>{targetAssignment.room_id}</strong> ({targetAssignment.room_name})</div>
               <div>Date & Shift: <strong>{targetAssignment.date}</strong> — <strong>{targetAssignment.session}</strong></div>
-              <div className="mono-metric" style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                Current Version Counter: #{schedule?.counter}
+              <div style={{ marginTop: '6px', borderTop: '1px solid var(--border-subtle)', paddingTop: '6px' }}>
+                <div>
+                  Current Invigilator:{' '}
+                  <strong>{targetAssignment.faculty_name}</strong> (<span className="faculty-id">{targetAssignment.faculty_id}</span>)
+                </div>
+                <div>
+                  Current Frisking Teacher:{' '}
+                  <strong>{targetAssignment.frisking_faculty_name || targetAssignment.frisking_faculty_id || 'None'}</strong>{' '}
+                  {targetAssignment.frisking_faculty_id && <span className="faculty-id">({targetAssignment.frisking_faculty_id})</span>}
+                </div>
               </div>
             </div>
 
@@ -635,7 +852,9 @@ export const AllotmentEngine: React.FC = () => {
                   {reassignViolations.length > 0 && (
                     <ul style={{ marginTop: '6px', paddingLeft: '16px', fontSize: '0.8rem' }}>
                       {reassignViolations.map((v: any, idx: number) => (
-                        <li key={idx}>[{v.rule}] {v.message}</li>
+                        <li key={idx}>
+                          [{v.rule}] {v.message}
+                        </li>
                       ))}
                     </ul>
                   )}
@@ -657,7 +876,9 @@ export const AllotmentEngine: React.FC = () => {
             )}
 
             <div className="form-group">
-              <label className="form-label">Select Replacement Faculty Member</label>
+              <label className="form-label">
+                Select Replacement {reassignRoleTarget === 'INVIGILATOR' ? 'Invigilator' : 'Frisking Teacher'}
+              </label>
               <select
                 required
                 value={candidateFacultyId}
@@ -665,28 +886,31 @@ export const AllotmentEngine: React.FC = () => {
                 className="form-select"
               >
                 <option value="">-- Choose Candidate Faculty --</option>
-                {allFaculty.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.id} — {f.name} ({f.department})
-                  </option>
-                ))}
+                {allFaculty.map((f) => {
+                  const isAlreadyAssignedInRoom =
+                    (reassignRoleTarget === 'INVIGILATOR' && f.id === targetAssignment.frisking_faculty_id) ||
+                    (reassignRoleTarget === 'FRISKING' && f.id === targetAssignment.faculty_id);
+
+                  return (
+                    <option key={f.id} value={f.id} disabled={isAlreadyAssignedInRoom}>
+                      {f.id} — {f.name} ({f.department}) {isAlreadyAssignedInRoom ? '⚠️ [Already paired in this room]' : ''}
+                    </option>
+                  );
+                })}
               </select>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                Note: The teacher currently serving in the other role for this room cannot be chosen.
+              </div>
             </div>
 
             <div className="form-group">
               <label className="form-label">
-                {schedule?.state === 'APPROVED' || schedule?.state === 'PUBLISHED' || schedule?.state === 'REVISED'
-                  ? 'Reason for Revision (Mandatory)'
-                  : 'Reason for Reassignment (Mandatory)'} <span style={{ color: 'var(--error)' }}>*</span>
+                Reason for {reassignRoleTarget === 'INVIGILATOR' ? 'Invigilator' : 'Frisking'} Revision (Mandatory) <span style={{ color: 'var(--error)' }}>*</span>
               </label>
               <input
                 type="text"
                 required
-                placeholder={
-                  schedule?.state === 'APPROVED' || schedule?.state === 'PUBLISHED' || schedule?.state === 'REVISED'
-                    ? 'e.g. Departmental duty clash resolution / Medical substitute'
-                    : 'Administrative adjustment rationale'
-                }
+                placeholder="e.g. Departmental duty clash resolution / Medical substitution"
                 value={reassignReason}
                 onChange={(e) => setReassignReason(e.target.value)}
                 className="form-input"
@@ -733,8 +957,12 @@ export const AllotmentEngine: React.FC = () => {
                 <tbody>
                   {currentAccounting.facultyDetails?.map((fd: any) => (
                     <tr key={fd.facultyId}>
-                      <td><span className="faculty-id">{fd.facultyId}</span></td>
-                      <td><strong>{fd.facultyName}</strong></td>
+                      <td>
+                        <span className="faculty-id">{fd.facultyId}</span>
+                      </td>
+                      <td>
+                        <strong>{fd.facultyName}</strong>
+                      </td>
                       <td>{fd.department}</td>
                       <td>
                         <Badge

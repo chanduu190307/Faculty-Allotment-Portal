@@ -54,6 +54,25 @@ describe('Phase 1: Safe Database Remediation Tests', () => {
 
       db.close();
     });
+
+    it('initializes a completely clean first-run database with 0 sample faculty, rooms, or exams', () => {
+      const db = new Database(':memory:');
+      runMigrations(db);
+
+      const facCount = (db.prepare('SELECT count(*) as count FROM faculty').get() as any).count;
+      const roomCount = (db.prepare('SELECT count(*) as count FROM rooms').get() as any).count;
+      const examCount = (db.prepare('SELECT count(*) as count FROM examinations').get() as any).count;
+      const schedCount = (db.prepare('SELECT count(*) as count FROM schedules').get() as any).count;
+      const assignCount = (db.prepare('SELECT count(*) as count FROM assignments').get() as any).count;
+
+      expect(facCount).toBe(0);
+      expect(roomCount).toBe(0);
+      expect(examCount).toBe(0);
+      expect(schedCount).toBe(0);
+      expect(assignCount).toBe(0);
+
+      db.close();
+    });
   });
 
   describe('2. Legacy Database Upgrade & Data Preservation', () => {

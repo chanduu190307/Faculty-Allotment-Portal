@@ -151,3 +151,15 @@ export function seedDatabase(db: Database.Database, options: SeedOptions = {}): 
 
   transaction();
 }
+
+if (require.main === module) {
+  const { getDatabase, closeDatabase } = require('./connection');
+  const { runMigrations } = require('./schema');
+  console.log('[Seed] Seeding database with test fixture dataset...');
+  const db = getDatabase();
+  runMigrations(db);
+  seedDatabase(db);
+  console.log('[Seed] Completed successfully.');
+  closeDatabase();
+}
+

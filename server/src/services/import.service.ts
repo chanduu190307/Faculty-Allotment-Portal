@@ -4,6 +4,7 @@ import ExcelJS from 'exceljs';
 import { getDatabase } from '../db/connection';
 import { AuditService } from './audit.service';
 import { Faculty, Room } from '../domain/scheduling/types';
+import { PdfFacultyParserService, PdfFacultyParseResult, ExtractedFacultyRow } from './pdf-faculty-parser.service';
 
 export interface RowValidationError {
   field: string;
@@ -81,6 +82,19 @@ export class ImportService {
       throw new Error('Uploaded file is empty.');
     }
 
+    // Check for legacy binary .xls file (OLE CFB header: D0 CF 11 E0)
+    if (
+      fileBuffer.length >= 8 &&
+      fileBuffer[0] === 0xd0 &&
+      fileBuffer[1] === 0xcf &&
+      fileBuffer[2] === 0x11 &&
+      fileBuffer[3] === 0xe0
+    ) {
+      throw new Error(
+        'Legacy Excel format (.xls binary) is not supported. Please save or convert the file to modern .xlsx format or export as .csv before uploading.'
+      );
+    }
+
     if (fileType === 'csv') {
       let records: any[];
       try {
@@ -100,7 +114,7 @@ export class ImportService {
         raw: rec,
       }));
     } else {
-      // ExcelJS
+      // ExcelJS with multi-sheet support and formula defense
       const workbook = new ExcelJS.Workbook();
       try {
         await workbook.xlsx.load(fileBuffer as any);
@@ -108,44 +122,102 @@ export class ImportService {
         throw new Error(`Malformed Excel file: ${err.message}`);
       }
 
-      const sheet = workbook.worksheets[0];
-      if (!sheet || sheet.rowCount < 2) {
+      if (!workbook.worksheets || workbook.worksheets.length === 0) {
         return [];
       }
 
-      // Find header row (first populated row)
-      let headerRowNumber = 1;
-      let headers: string[] = [];
-
-      sheet.eachRow({ includeEmpty: false }, (row, rNum) => {
-        if (headers.length === 0) {
-          headerRowNumber = rNum;
-          row.eachCell((cell, colNum) => {
-            headers[colNum] = String(cell.value || '').trim();
-          });
-        }
-      });
-
       const results: Array<{ rowNumber: number; raw: Record<string, any> }> = [];
-      sheet.eachRow({ includeEmpty: false }, (row, rNum) => {
-        if (rNum <= headerRowNumber) return; // skip header
-        const raw: Record<string, any> = {};
-        let hasValue = false;
-        row.eachCell((cell, colNum) => {
-          const header = headers[colNum];
-          if (header) {
-            let val = cell.value;
-            if (val && typeof val === 'object' && 'text' in val) {
-              val = (val as any).text;
+      let overallRowNumber = 2;
+
+      for (const sheet of workbook.worksheets) {
+        if (!sheet || sheet.rowCount < 2) continue;
+
+        // Find header row (first row with recognized faculty/room fields)
+        let headerRowNumber = -1;
+        let headers: Record<number, string> = {};
+
+        sheet.eachRow({ includeEmpty: false }, (row, rNum) => {
+          if (headerRowNumber !== -1) return;
+          const candidateHeaders: Record<number, string> = {};
+          let recognizedCount = 0;
+
+          row.eachCell((cell, colNum) => {
+            const h = String(cell.value || '').trim();
+            if (h) {
+              candidateHeaders[colNum] = h;
+              const norm = normalizeHeader(h);
+              if (
+                [
+                  'id', 'facultyid', 'empid', 'code', 'teacherid', 'staffid', 'employeeid', 'empno',
+                  'name', 'facultyname', 'fullname', 'teachername', 'staffname', 'lecturername', 'employeename',
+                  'department', 'dept', 'branch', 'program', 'discipline',
+                  'email', 'mail', 'emailaddress',
+                  'designation', 'desig', 'role', 'title', 'position', 'cadre',
+                  'phone', 'mobile', 'contact',
+                  'building', 'floor', 'capacity', 'room', 'roomname'
+                ].includes(norm)
+              ) {
+                recognizedCount++;
+              }
             }
-            raw[header] = val !== null && val !== undefined ? String(val).trim() : '';
-            if (raw[header]) hasValue = true;
+          });
+
+          if (recognizedCount > 0) {
+            headerRowNumber = rNum;
+            headers = candidateHeaders;
           }
         });
-        if (hasValue) {
-          results.push({ rowNumber: rNum, raw });
+
+        // Fallback: if no recognized header keyword found, take first non-empty row
+        if (headerRowNumber === -1) {
+          sheet.eachRow({ includeEmpty: false }, (row, rNum) => {
+            if (headerRowNumber !== -1) return;
+            headerRowNumber = rNum;
+            row.eachCell((cell, colNum) => {
+              const h = String(cell.value || '').trim();
+              if (h) headers[colNum] = h;
+            });
+          });
         }
-      });
+
+        if (headerRowNumber === -1) continue;
+
+        sheet.eachRow({ includeEmpty: false }, (row, rNum) => {
+          if (rNum <= headerRowNumber) return; // skip header
+          const raw: Record<string, any> = {};
+          let hasValue = false;
+
+          row.eachCell((cell, colNum) => {
+            const header = headers[colNum];
+            if (header) {
+              let val = cell.value;
+              // Defend against formula objects & rich text
+              if (val && typeof val === 'object') {
+                if ('result' in val) {
+                  val = (val as any).result;
+                } else if ('text' in val) {
+                  val = (val as any).text;
+                } else if ('richText' in val && Array.isArray((val as any).richText)) {
+                  val = (val as any).richText.map((rt: any) => rt.text).join('');
+                }
+              }
+
+              let strVal = val !== null && val !== undefined ? String(val).trim() : '';
+              // Defend against formula injection strings starting with '='
+              if (strVal.startsWith('=')) {
+                strVal = strVal.replace(/^=+\s*/, '');
+              }
+
+              raw[header] = strVal;
+              if (strVal) hasValue = true;
+            }
+          });
+
+          if (hasValue) {
+            results.push({ rowNumber: overallRowNumber++, raw });
+          }
+        });
+      }
 
       return results;
     }
@@ -186,17 +258,17 @@ export class ImportService {
       const mapped: Partial<FacultyImportRow> = {};
       for (const [key, val] of Object.entries(raw)) {
         const norm = normalizeHeader(key);
-        if (['id', 'facultyid', 'facultyno', 'empid', 'code'].includes(norm)) {
+        if (['id', 'facultyid', 'facultyno', 'empid', 'code', 'teacherid', 'staffid', 'employeeid', 'empno'].includes(norm)) {
           mapped.id = String(val).trim();
-        } else if (['name', 'facultyname', 'fullname'].includes(norm)) {
+        } else if (['name', 'facultyname', 'fullname', 'teachername', 'staffname', 'lecturername', 'employeename', 'faculty'].includes(norm)) {
           mapped.name = String(val).trim();
-        } else if (['email', 'emailid', 'mail'].includes(norm)) {
+        } else if (['email', 'emailid', 'mail', 'emailaddress', 'officialemail'].includes(norm)) {
           mapped.email = String(val).trim();
-        } else if (['department', 'dept', 'branch'].includes(norm)) {
+        } else if (['department', 'dept', 'branch', 'program', 'discipline', 'departmentname'].includes(norm)) {
           mapped.department = String(val).trim();
-        } else if (['designation', 'desig', 'role', 'title'].includes(norm)) {
+        } else if (['designation', 'desig', 'role', 'title', 'position', 'cadre', 'rank'].includes(norm)) {
           mapped.designation = String(val).trim();
-        } else if (['phone', 'mobile', 'contact'].includes(norm)) {
+        } else if (['phone', 'mobile', 'contact', 'phoneno', 'mobileno', 'contactno', 'telephone'].includes(norm)) {
           mapped.phone = String(val).trim();
         } else if (['active', 'status', 'isactive'].includes(norm)) {
           mapped.active = parseBooleanVal(val, true);
@@ -487,6 +559,181 @@ export class ImportService {
     commitTx();
 
     return { imported, updated };
+  }
+
+  /**
+   * Previews and parses faculty PDF document.
+   */
+  public static async previewFacultyPdfImport(
+    fileBuffer: Buffer,
+    filename = 'faculty_list.pdf',
+    options: { allowUpdateExisting?: boolean } = {}
+  ): Promise<PdfFacultyParseResult> {
+    const db = getDatabase();
+    const existingFaculty = db.prepare('SELECT id, email, name, department FROM faculty').all() as Array<{
+      id: string;
+      email: string;
+      name: string;
+      department: string;
+    }>;
+    return PdfFacultyParserService.parseFacultyPdf(fileBuffer, filename, existingFaculty, options);
+  }
+
+  /**
+   * Commits validated faculty records extracted from PDF.
+   */
+  public static commitFacultyPdfImport(
+    records: ExtractedFacultyRow[],
+    actor = 'System Admin',
+    allowUpdateExisting = false
+  ): { imported: number; updated: number; skipped: number; failed: number } {
+    if (!records || records.length === 0) {
+      throw new Error('No faculty records provided for import.');
+    }
+
+    const db = getDatabase();
+    const now = new Date().toISOString();
+
+    let imported = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    const recordsToProcess: ExtractedFacultyRow[] = [];
+    const seenIds = new Set<string>();
+    const seenEmails = new Set<string>();
+
+    for (const rec of records) {
+      if (rec.action === 'SKIP') {
+        skipped++;
+        continue;
+      }
+
+      if (!rec.id || !rec.id.trim()) {
+        throw new Error(`Row ${rec.rowNumber}: Missing required field: Faculty ID. All imported records must have an ID.`);
+      }
+      if (!rec.name || !rec.name.trim()) {
+        throw new Error(`Row ${rec.rowNumber}: Missing required field: Faculty Name.`);
+      }
+      if (!rec.email || !rec.email.trim() || !EMAIL_REGEX.test(rec.email.trim())) {
+        throw new Error(`Row ${rec.rowNumber}: Invalid or missing email address "${rec.email}".`);
+      }
+
+      const idLower = rec.id.trim().toLowerCase();
+      const emailLower = rec.email.trim().toLowerCase();
+
+      if (seenIds.has(idLower)) {
+        throw new Error(`Row ${rec.rowNumber}: Duplicate Faculty ID "${rec.id}" in confirmation batch.`);
+      }
+      if (seenEmails.has(emailLower)) {
+        throw new Error(`Row ${rec.rowNumber}: Duplicate Email "${rec.email}" in confirmation batch.`);
+      }
+
+      seenIds.add(idLower);
+      seenEmails.add(emailLower);
+      recordsToProcess.push(rec);
+    }
+
+    if (recordsToProcess.length === 0) {
+      return { imported: 0, updated: 0, skipped, failed: 0 };
+    }
+
+    const checkIdStmt = db.prepare('SELECT id, name, email, department, designation, phone, active, exempt, max_duty_override FROM faculty WHERE LOWER(id) = LOWER(?)');
+    const checkEmailStmt = db.prepare('SELECT id, name FROM faculty WHERE LOWER(email) = LOWER(?) AND LOWER(id) != LOWER(?)');
+
+    const insertStmt = db.prepare(`
+      INSERT INTO faculty (id, name, email, department, designation, phone, active, exempt, max_duty_override, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, 0, NULL, ?, ?)
+    `);
+
+    const updateStmt = db.prepare(`
+      UPDATE faculty
+      SET name = ?, email = ?, department = ?, designation = ?, phone = ?, updated_at = ?
+      WHERE LOWER(id) = LOWER(?)
+    `);
+
+    const commitTx = db.transaction(() => {
+      for (const rec of recordsToProcess) {
+        const existing = checkIdStmt.get(rec.id) as any;
+
+        const emailCollision = checkEmailStmt.get(rec.email, rec.id) as any;
+        if (emailCollision) {
+          throw new Error(
+            `Email collision: "${rec.email}" is already registered to faculty "${emailCollision.id}" (${emailCollision.name}).`
+          );
+        }
+
+        if (existing) {
+          if (!allowUpdateExisting) {
+            throw new Error(`Conflict: Faculty ID "${rec.id}" already exists in the database. Enable update mode to overwrite.`);
+          }
+
+          // Guard: Cannot change department if faculty is assigned to room restricted to that department
+          const targetDept = rec.department && rec.department.trim() ? rec.department.trim() : existing.department;
+          if (targetDept && existing.department && targetDept.toLowerCase() !== existing.department.toLowerCase()) {
+            const deptConflict = db.prepare(`
+              SELECT s.id as scheduleId, r.id as roomId, r.name as roomName, r.exam_department
+              FROM assignments a
+              JOIN schedules s ON a.schedule_id = s.id
+              JOIN rooms r ON a.room_id = r.id
+              WHERE a.faculty_id = ? AND a.status != 'CANCELLED' AND s.state IN ('APPROVED', 'PUBLISHED', 'IN_PROGRESS')
+                AND LOWER(TRIM(r.exam_department)) = LOWER(TRIM(?))
+              LIMIT 1
+            `).get(existing.id, targetDept) as any;
+            if (deptConflict) {
+              throw new Error(
+                `Cannot commit import: Changing department to "${targetDept}" for faculty "${rec.id}" conflicts with room ${deptConflict.roomId} in approved schedule "${deptConflict.scheduleId}".`
+              );
+            }
+          }
+
+          // Do not overwrite valid existing data with empty extracted values
+          const updatedName = rec.name && rec.name.trim() ? rec.name.trim() : existing.name;
+          const updatedEmail = rec.email && rec.email.trim() ? rec.email.trim() : existing.email;
+          const updatedDept = targetDept;
+          const updatedDesig = rec.designation && rec.designation.trim() ? rec.designation.trim() : existing.designation;
+          const updatedPhone = rec.phone && rec.phone.trim() ? rec.phone.trim() : existing.phone;
+
+          updateStmt.run(updatedName, updatedEmail, updatedDept, updatedDesig, updatedPhone, now, existing.id);
+          updated++;
+        } else {
+          const finalDept = rec.department && rec.department.trim() ? rec.department.trim() : 'General';
+          const finalDesig = rec.designation && rec.designation.trim() ? rec.designation.trim() : 'Assistant Professor';
+          insertStmt.run(
+            rec.id.trim(),
+            rec.name.trim(),
+            rec.email.trim(),
+            finalDept,
+            finalDesig,
+            rec.phone ? rec.phone.trim() : null,
+            now,
+            now
+          );
+          imported++;
+        }
+      }
+
+      AuditService.log(
+        {
+          entity: 'faculty',
+          entityId: `PDF_IMPORT_${Date.now()}`,
+          action: 'FACULTY_IMPORTED',
+          actor,
+          newValues: {
+            total: records.length,
+            imported,
+            updated,
+            skipped,
+            ids: recordsToProcess.map((r) => r.id),
+          },
+          reason: `PDF faculty import of ${records.length} records (${imported} added, ${updated} updated, ${skipped} skipped)`,
+        },
+        db
+      );
+    });
+
+    commitTx();
+
+    return { imported, updated, skipped, failed: 0 };
   }
 
   /**

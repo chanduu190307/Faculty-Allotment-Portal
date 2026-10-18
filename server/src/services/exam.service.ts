@@ -221,4 +221,69 @@ export class ExamService {
       newValues: { status },
     });
   }
+
+  public static update(
+    examinationId: string,
+    data: Partial<ExaminationRecord>,
+    actor = 'System Admin'
+  ): ExaminationRecord | null {
+    const db = getDatabase();
+    const old = ExamService.getById(examinationId);
+    if (!old) return null;
+
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (data.name !== undefined) {
+      fields.push('name = ?');
+      values.push(data.name);
+    }
+    if (data.academicYear !== undefined) {
+      fields.push('academic_year = ?');
+      values.push(data.academicYear);
+    }
+    if (data.startDate !== undefined) {
+      fields.push('start_date = ?');
+      values.push(data.startDate);
+    }
+    if (data.endDate !== undefined) {
+      fields.push('end_date = ?');
+      values.push(data.endDate);
+    }
+    if (data.defaultStaffingPerRoom !== undefined) {
+      fields.push('default_staffing_per_room = ?');
+      values.push(data.defaultStaffingPerRoom);
+    }
+    if (data.maxDutiesPerFaculty !== undefined) {
+      fields.push('max_duties_per_faculty = ?');
+      values.push(data.maxDutiesPerFaculty);
+    }
+    if (data.restDays !== undefined) {
+      fields.push('rest_days = ?');
+      values.push(data.restDays);
+    }
+    if (data.status !== undefined) {
+      fields.push('status = ?');
+      values.push(data.status);
+    }
+
+    if (fields.length > 0) {
+      fields.push('updated_at = ?');
+      values.push(new Date().toISOString());
+      values.push(examinationId);
+
+      db.prepare(`UPDATE examinations SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+
+      AuditService.log({
+        entity: 'examination',
+        entityId: examinationId,
+        action: 'UPDATE',
+        actor,
+        oldValues: old,
+        newValues: data,
+      });
+    }
+
+    return ExamService.getById(examinationId);
+  }
 }

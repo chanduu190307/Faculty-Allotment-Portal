@@ -85,6 +85,27 @@ CREATE TABLE IF NOT EXISTS examination_dates (
 
 CREATE INDEX IF NOT EXISTS idx_exam_dates ON examination_dates(examination_id, sequence_order);
 
+-- Examination Timetable table
+CREATE TABLE IF NOT EXISTS examination_timetable (
+  id TEXT PRIMARY KEY,
+  examination_id TEXT NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+  exam_date TEXT NOT NULL,
+  session TEXT NOT NULL,
+  subject_code TEXT NOT NULL,
+  subject_name TEXT NOT NULL,
+  start_time TEXT NOT NULL,
+  end_time TEXT NOT NULL,
+  duration_minutes INTEGER,
+  semester TEXT DEFAULT NULL,
+  program_group TEXT DEFAULT NULL,
+  slot TEXT DEFAULT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_timetable_exam ON examination_timetable(examination_id);
+CREATE INDEX IF NOT EXISTS idx_timetable_date_session ON examination_timetable(examination_id, exam_date, session);
+
 -- Examination Rooms Link table
 CREATE TABLE IF NOT EXISTS examination_rooms (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +156,8 @@ CREATE TABLE IF NOT EXISTS assignments (
   session TEXT NOT NULL,
   room_id TEXT NOT NULL REFERENCES rooms(id),
   faculty_id TEXT NOT NULL REFERENCES faculty(id),
+  frisking_faculty_id TEXT DEFAULT NULL REFERENCES faculty(id),
+  role TEXT NOT NULL DEFAULT 'DUAL',
   status TEXT NOT NULL DEFAULT 'SCHEDULED', -- 'SCHEDULED', 'COMPLETED', 'ABSENT', 'CANCELLED', 'SUBSTITUTED'
   marked_at TEXT,
   marked_by TEXT,
@@ -240,8 +263,35 @@ export function runMigrations(db: Database.Database): void {
     }
     db.exec('CREATE INDEX IF NOT EXISTS idx_schedules_base ON schedules(base_schedule_id);');
 
-    // 3. Conflict verification before creating partial unique index
+    // 2f. Examination Timetable table: semester, program_group, slot columns
+    const ttCols = getExistingColumns(db, 'examination_timetable');
+    if (ttCols.size > 0 && !ttCols.has('semester')) {
+      db.exec('ALTER TABLE examination_timetable ADD COLUMN semester TEXT DEFAULT NULL;');
+    }
+    if (ttCols.size > 0 && !ttCols.has('program_group')) {
+      db.exec('ALTER TABLE examination_timetable ADD COLUMN program_group TEXT DEFAULT NULL;');
+    }
+    if (ttCols.size > 0 && !ttCols.has('slot')) {
+      db.exec('ALTER TABLE examination_timetable ADD COLUMN slot TEXT DEFAULT NULL;');
+    }
+
+    // 2g. Assignments table: frisking_faculty_id and role columns
     const asgnCols = getExistingColumns(db, 'assignments');
+    if (asgnCols.size > 0 && !asgnCols.has('frisking_faculty_id')) {
+      db.exec('ALTER TABLE assignments ADD COLUMN frisking_faculty_id TEXT DEFAULT NULL REFERENCES faculty(id);');
+    }
+    if (asgnCols.size > 0 && !asgnCols.has('role')) {
+      db.exec("ALTER TABLE assignments ADD COLUMN role TEXT NOT NULL DEFAULT 'DUAL';");
+    }
+
+    if (getExistingColumns(db, 'assignments').has('frisking_faculty_id')) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_assignments_sched_frisking 
+        ON assignments(schedule_id, frisking_faculty_id);
+      `);
+    }
+
+    // 3. Conflict verification before creating partial unique index
     if (asgnCols.size > 0) {
       const conflicts = db.prepare(`
         SELECT schedule_id, date, faculty_id, count(*) as count
@@ -266,6 +316,12 @@ export function runMigrations(db: Database.Database): void {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_unique_daily_teacher 
         ON assignments(schedule_id, date, faculty_id) 
         WHERE status != 'CANCELLED';
+      `);
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_assignments_unique_daily_frisking 
+        ON assignments(schedule_id, date, frisking_faculty_id) 
+        WHERE status != 'CANCELLED' AND frisking_faculty_id IS NOT NULL;
       `);
     }
   });

@@ -9,6 +9,8 @@ import { SettingsService } from '../services/settings.service';
 import { AuditService } from '../services/audit.service';
 import { ExportService } from '../services/export.service';
 import { ImportService } from '../services/import.service';
+import { TimetableService } from '../services/timetable.service';
+import { CleanupService } from '../services/cleanup.service';
 import { checkCapacityFeasibility } from '../domain/scheduling/capacity';
 import { requireRole } from '../middleware/auth';
 
@@ -27,9 +29,18 @@ apiRouter.get('/settings', (_req: Request, res: Response) => {
   res.json({ success: true, data });
 });
 
+apiRouter.get('/settings/summary', (_req: Request, res: Response) => {
+  const summary = SettingsService.getSystemCountsSummary();
+  res.json({ success: true, data: summary });
+});
+
 apiRouter.put('/settings', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  SettingsService.updateMany(req.body, req.user?.name);
-  res.json({ success: true, data: SettingsService.getAll() });
+  try {
+    SettingsService.updateMany(req.body, req.user?.name);
+    res.json({ success: true, data: SettingsService.getAll(), summary: SettingsService.getSystemCountsSummary() });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message || 'Invalid settings payload.' });
+  }
 });
 
 // ==========================================
@@ -98,27 +109,95 @@ apiRouter.get('/faculty/:id/history', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/faculty', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  const created = FacultyService.create(req.body, req.user?.name);
-  res.status(201).json({ success: true, data: created });
+  try {
+    const created = FacultyService.create(req.body, req.user?.name);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 apiRouter.put('/faculty/:id', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  const updated = FacultyService.update(p(req.params.id), req.body, req.user?.name);
-  if (!updated) {
-    res.status(404).json({ success: false, error: 'Faculty member not found' });
-    return;
+  try {
+    const updated = FacultyService.update(p(req.params.id), req.body, req.user?.name);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Faculty member not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
   }
-  res.json({ success: true, data: updated });
 });
 
 apiRouter.delete('/faculty/:id', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  const ok = FacultyService.delete(p(req.params.id), req.user?.name);
-  res.json({ success: ok });
+  try {
+    const id = p(req.params.id);
+    const deletableCheck = FacultyService.checkDeletable(id);
+    if (!deletableCheck.canDelete) {
+      res.status(409).json({
+        success: false,
+        error: deletableCheck.message,
+        canDeactivate: true,
+      });
+      return;
+    }
+    const ok = FacultyService.delete(id, req.user?.name);
+    res.json({ success: ok });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.put('/faculty/:id/deactivate', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  try {
+    const faculty = FacultyService.deactivate(p(req.params.id), req.user?.name);
+    res.json({ success: true, data: faculty });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 // ==========================================
 // 4. ROOM MANAGEMENT
 // ==========================================
+apiRouter.get('/rooms/diagnostics', (_req: Request, res: Response) => {
+  try {
+    const diag = RoomService.getRoomHierarchyDiagnostics();
+    res.json({ success: true, data: diag });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/rooms/bulk-generate/preview', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  try {
+    const { block, floor, count, prefix } = req.body;
+    if (!block || floor === undefined) {
+      res.status(400).json({ success: false, error: 'Block and floor are required.' });
+      return;
+    }
+    const preview = RoomService.bulkGeneratePreview({ block, floor, count, prefix });
+    res.json({ success: true, data: preview });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/rooms/bulk-generate/commit', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  try {
+    const { block, floor, rooms } = req.body;
+    if (!block || floor === undefined || !Array.isArray(rooms)) {
+      res.status(400).json({ success: false, error: 'Block, floor, and rooms array are required.' });
+      return;
+    }
+    const result = RoomService.bulkGenerateCommit({ block, floor, rooms }, req.user?.name);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 apiRouter.get('/rooms', (req: Request, res: Response) => {
   const filter = {
     building: req.query.building as string | undefined,
@@ -142,22 +221,53 @@ apiRouter.get('/rooms/:id', (req: Request, res: Response) => {
 });
 
 apiRouter.post('/rooms', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  const created = RoomService.create(req.body, req.user?.name);
-  res.status(201).json({ success: true, data: created });
+  try {
+    const created = RoomService.create(req.body, req.user?.name);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 apiRouter.put('/rooms/:id', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  const updated = RoomService.update(p(req.params.id), req.body, req.user?.name);
-  if (!updated) {
-    res.status(404).json({ success: false, error: 'Room not found' });
-    return;
+  try {
+    const updated = RoomService.update(p(req.params.id), req.body, req.user?.name);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Room not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
   }
-  res.json({ success: true, data: updated });
 });
 
 apiRouter.delete('/rooms/:id', requireRole(['ADMIN']), (req: Request, res: Response) => {
-  const ok = RoomService.delete(p(req.params.id), req.user?.name);
-  res.json({ success: ok });
+  try {
+    const id = p(req.params.id);
+    const deletableCheck = RoomService.checkDeletable(id);
+    if (!deletableCheck.canDelete) {
+      res.status(409).json({
+        success: false,
+        error: deletableCheck.message,
+        canDeactivate: true,
+      });
+      return;
+    }
+    const ok = RoomService.delete(id, req.user?.name);
+    res.json({ success: ok });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.put('/rooms/:id/deactivate', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  try {
+    const room = RoomService.deactivate(p(req.params.id), req.user?.name);
+    res.json({ success: true, data: room });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 // ==========================================
@@ -182,6 +292,19 @@ apiRouter.post('/examinations', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Re
   res.status(201).json({ success: true, data: created });
 });
 
+apiRouter.put('/examinations/:id', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
+  try {
+    const updated = ExamService.update(p(req.params.id), req.body, req.user?.name);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Examination not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
 apiRouter.put('/examinations/:id/dates', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
   ExamService.updateDates(p(req.params.id), req.body.dates, req.user?.name);
   res.json({ success: true, data: ExamService.getById(p(req.params.id)) });
@@ -190,6 +313,20 @@ apiRouter.put('/examinations/:id/dates', requireRole(['ADMIN', 'EXAM_OFFICER']),
 apiRouter.put('/examinations/:id/status', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
   ExamService.updateStatus(p(req.params.id), req.body.status, req.user?.name);
   res.json({ success: true });
+});
+
+apiRouter.get('/examinations/:id/timetable', (req: Request, res: Response) => {
+  const timetable = TimetableService.getTimetable(p(req.params.id));
+  res.json({ success: true, data: timetable });
+});
+
+apiRouter.delete('/examinations/:id/timetable', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
+  try {
+    TimetableService.deleteTimetable(p(req.params.id), req.user?.name);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
 });
 
 // ==========================================
@@ -205,6 +342,17 @@ apiRouter.post('/allotment/preflight/:examId', (req: Request, res: Response) => 
   }
 
   const leaves = FacultyService.getLeaves();
+  const expectedRoomCount = SettingsService.getExpectedRoomCount();
+  const expectedFacultyCount = SettingsService.getExpectedFacultyCount();
+  const timetableRecords = TimetableService.getTimetable(exam.id);
+  const timetableSessions = timetableRecords.length > 0
+    ? timetableRecords.map((t) => ({ date: t.examDate, session: t.session }))
+    : undefined;
+
+  const requireDualRole = req.body?.requireDualRole !== undefined
+    ? Boolean(req.body.requireDualRole)
+    : (exam.defaultStaffingPerRoom >= 2);
+
   const preflight = checkCapacityFeasibility(
     exam.dates || [],
     exam.sessionConfig,
@@ -212,7 +360,14 @@ apiRouter.post('/allotment/preflight/:examId', (req: Request, res: Response) => 
     exam.faculty || [],
     leaves,
     exam.maxDutiesPerFaculty,
-    exam.restDays ?? 1
+    exam.restDays ?? 1,
+    {
+      expectedRoomCount,
+      expectedFacultyCount,
+      timetableSessions,
+      timetableRecordsCount: timetableRecords.length,
+      requireDualRole,
+    }
   );
 
   res.json({ success: true, data: preflight });
@@ -221,7 +376,10 @@ apiRouter.post('/allotment/preflight/:examId', (req: Request, res: Response) => 
 // Generate Allotment
 apiRouter.post('/allotment/generate/:examId', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
   const seed = req.body && typeof req.body.seed === 'number' ? req.body.seed : null;
-  const result = ScheduleService.generate(p(req.params.examId), req.user?.name, seed);
+  const requireDualRole = req.body && typeof req.body.requireDualRole === 'boolean'
+    ? req.body.requireDualRole
+    : undefined;
+  const result = ScheduleService.generate(p(req.params.examId), req.user?.name, seed, { requireDualRole });
   if (!result.success) {
     res.status(400).json({
       success: false,
@@ -315,7 +473,7 @@ apiRouter.post('/allotment/:scheduleId/publish', requireRole(['ADMIN', 'EXAM_OFF
 
 // Manual Reassignment with domain validator & revision support
 apiRouter.post('/allotment/:scheduleId/reassign', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
-  const { assignmentId, newFacultyId, reason, expectedCounter } = req.body;
+  const { assignmentId, newFacultyId, reason, expectedCounter, roleTarget } = req.body;
   const parsedCounter =
     expectedCounter !== undefined && expectedCounter !== null ? Number(expectedCounter) : undefined;
 
@@ -326,7 +484,8 @@ apiRouter.post('/allotment/:scheduleId/reassign', requireRole(['ADMIN', 'EXAM_OF
       newFacultyId,
       reason,
       req.user?.name,
-      parsedCounter
+      parsedCounter,
+      roleTarget === 'FRISKING' ? 'FRISKING' : 'INVIGILATOR'
     );
     if (!result.success) {
       const isConflict = result.error && result.error.toLowerCase().includes('concurrency conflict');
@@ -526,7 +685,7 @@ apiRouter.get('/reports/room-sheets/:scheduleId/pdf', async (req: Request, res: 
 // ==========================================
 // 9. CSV & EXCEL DATA IMPORT
 // ==========================================
-// Preview Faculty Import
+// Preview Faculty Import (CSV/XLSX)
 apiRouter.post('/import/faculty/preview', async (req: Request, res: Response) => {
   const { fileBase64, fileType, allowUpdateExisting } = req.body;
   if (!fileBase64 || !fileType) {
@@ -538,7 +697,30 @@ apiRouter.post('/import/faculty/preview', async (req: Request, res: Response) =>
   res.json({ success: true, preview });
 });
 
-// Commit Faculty Import
+// Preview Faculty PDF Import
+apiRouter.post('/import/faculty/pdf/preview', async (req: Request, res: Response) => {
+  const { fileBase64, filename, allowUpdateExisting } = req.body;
+  if (!fileBase64) {
+    res.status(400).json({ success: false, error: 'Missing fileBase64 in request body.' });
+    return;
+  }
+  try {
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const preview = await ImportService.previewFacultyPdfImport(
+      buffer,
+      filename || 'faculty_roster.pdf',
+      { allowUpdateExisting }
+    );
+    res.json({ success: true, preview });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      error: err.message || 'Failed to parse faculty PDF.',
+    });
+  }
+});
+
+// Commit Faculty Import (CSV/XLSX)
 apiRouter.post('/import/faculty/commit', requireRole(['ADMIN']), (req: Request, res: Response) => {
   const { rows, allowUpdateExisting } = req.body;
   if (!rows || !Array.isArray(rows)) {
@@ -547,6 +729,24 @@ apiRouter.post('/import/faculty/commit', requireRole(['ADMIN']), (req: Request, 
   }
   const result = ImportService.commitFacultyImport(rows, req.user?.name, allowUpdateExisting);
   res.json({ success: true, ...result });
+});
+
+// Commit Faculty PDF Import
+apiRouter.post('/import/faculty/pdf/commit', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  const { records, allowUpdateExisting } = req.body;
+  if (!records || !Array.isArray(records)) {
+    res.status(400).json({ success: false, error: 'Missing records array to commit.' });
+    return;
+  }
+  try {
+    const result = ImportService.commitFacultyPdfImport(records, req.user?.name, allowUpdateExisting);
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      error: err.message || 'Failed to commit faculty PDF import.',
+    });
+  }
 });
 
 // Preview Rooms Import
@@ -571,3 +771,90 @@ apiRouter.post('/import/rooms/commit', requireRole(['ADMIN']), (req: Request, re
   const result = ImportService.commitRoomImport(rows, req.user?.name, allowUpdateExisting);
   res.json({ success: true, ...result });
 });
+
+// ==========================================
+// 10. TIMETABLE PDF IMPORT
+// ==========================================
+// Preview Timetable PDF Import (in-memory, zero writes)
+apiRouter.post('/import/timetable/pdf/preview', async (req: Request, res: Response) => {
+  const { fileBase64, filename, examinationId } = req.body;
+  if (!fileBase64) {
+    res.status(400).json({ success: false, error: 'Missing fileBase64 in request body.' });
+    return;
+  }
+  try {
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const preview = await TimetableService.previewTimetablePdf(
+      buffer,
+      filename || 'exam_timetable.pdf',
+      examinationId
+    );
+    res.json({ success: true, preview });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      error: err.message || 'Failed to parse timetable PDF.',
+    });
+  }
+});
+
+// Commit Timetable PDF Import (transactional persistence)
+apiRouter.post('/import/timetable/pdf/commit', requireRole(['ADMIN', 'EXAM_OFFICER']), (req: Request, res: Response) => {
+  const { examinationId, records } = req.body;
+  if (!examinationId) {
+    res.status(400).json({ success: false, error: 'Missing examinationId.' });
+    return;
+  }
+  if (!records || !Array.isArray(records)) {
+    res.status(400).json({ success: false, error: 'Missing records array to commit.' });
+    return;
+  }
+  try {
+    const result = TimetableService.commitTimetable(examinationId, records, req.user?.name);
+    res.json({ ...result });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      error: err.message || 'Failed to commit timetable import.',
+    });
+  }
+});
+
+// ==========================================
+// 11. DATA CLEANUP & RESET
+// ==========================================
+apiRouter.get('/cleanup/preview', requireRole(['ADMIN']), (_req: Request, res: Response) => {
+  try {
+    const preview = CleanupService.getDeletionPreview();
+    res.json({ success: true, data: preview });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/cleanup/execute', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  try {
+    const result = CleanupService.executeSafeCleanup(req.user?.name);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+apiRouter.post('/cleanup/reset', requireRole(['ADMIN']), (req: Request, res: Response) => {
+  const { confirmation } = req.body;
+  if (confirmation !== 'RESET_DATABASE_CONFIRMED') {
+    res.status(400).json({
+      success: false,
+      error: 'Explicit confirmation string "RESET_DATABASE_CONFIRMED" is required to reset database.',
+    });
+    return;
+  }
+  try {
+    const result = CleanupService.resetDatabaseToCleanInstitutional(confirmation, req.user?.name);
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+

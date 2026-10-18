@@ -58,6 +58,8 @@ export class SchedulingEngine {
       seed = null,
       existingDuties = {},
       pastRoomHistory = {},
+      timetableSessions,
+      requireDualRole = false,
     } = input;
 
     // Persisted seed for deterministic tie-breaking (defaults to 42 if omitted)
@@ -71,13 +73,15 @@ export class SchedulingEngine {
       faculty,
       leaves,
       defaultMaxDuties,
-      restDays
+      restDays,
+      { timetableSessions, requireDualRole }
     );
 
     // If mathematically infeasible, return structured failure immediately
     if (!preflight.isFeasible) {
       return {
         success: false,
+        isInconclusive: false,
         assignments: [],
         seed: effectiveSeed,
         preflight,
@@ -93,6 +97,7 @@ export class SchedulingEngine {
         },
         failureDiagnostics: {
           provenInfeasible: true,
+          isInconclusive: false,
           reason: 'Mathematical infeasibility detected during pre-flight capacity evaluation.',
           details: preflight.reasons,
         },
@@ -161,17 +166,25 @@ export class SchedulingEngine {
       }
       const todayAssigned = dailyAssignedFaculty.get(currentDate)!;
 
-      for (const session of sessions) {
+      const activeDateSessions =
+        timetableSessions && timetableSessions.length > 0
+          ? sessions.filter((s) =>
+              timetableSessions.some(
+                (ts) => ts.date === currentDate && ts.session.toLowerCase() === s.name.toLowerCase()
+              )
+            )
+          : sessions;
+
+      for (const session of activeDateSessions) {
         const sessionAssignedFaculty = new Set<string>();
         const sessionAssignments: Assignment[] = [];
 
         // For each active room, allocate required staff
         for (const room of activeRooms) {
-          const requiredStaff = room.requiredStaffing ?? 1;
-
-          for (let s = 0; s < requiredStaff; s++) {
-            // Find eligible candidate
-            const candidate = SchedulingEngine.selectBestCandidate({
+          if (requireDualRole) {
+            // Dual-role Invigilation: allocate 2 distinct teachers (Invigilator + Frisking Teacher)
+            // 1. Select Invigilator
+            const invigilator = SchedulingEngine.selectBestCandidate({
               faculty: activeFaculty,
               currentDate,
               session: session.name,
@@ -188,14 +201,12 @@ export class SchedulingEngine {
               facultyRoomHistory,
             });
 
-            if (!candidate) {
-              // Allocation stalled: could not find an eligible candidate for this room
+            if (!invigilator) {
               const totalRequired = preflight.totalRequiredSlots;
-              const totalAssigned = generatedAssignments.length;
-              const missingSlots = totalRequired - totalAssigned;
-
+              const totalAssigned = generatedAssignments.length * 2;
               return {
                 success: false,
+                isInconclusive: true,
                 assignments: generatedAssignments,
                 seed: effectiveSeed,
                 preflight,
@@ -204,59 +215,247 @@ export class SchedulingEngine {
                   violations: [
                     {
                       rule: 'RULE_A',
-                      message: `Unstaffed room: Room ${room.id} on ${currentDate} session ${session.name} has no eligible candidates under active constraints.`,
+                      message: `Unstaffed room: Room ${room.id} on ${currentDate} session ${session.name} has no eligible candidates for Invigilator under active constraints.`,
                       date: currentDate,
                       session: session.name,
                       roomId: room.id,
                     },
                   ],
-                  coveragePercentage: (totalAssigned / totalRequired) * 100,
+                  coveragePercentage: totalRequired > 0 ? (totalAssigned / totalRequired) * 100 : 0,
                   totalRequiredSlots: totalRequired,
                   totalAssignedSlots: totalAssigned,
                 },
                 failureDiagnostics: {
                   provenInfeasible: false,
-                  reason: `Constraint exhaustion: Unable to staff room ${room.id} on ${currentDate} ${session.name}.`,
+                  isInconclusive: true,
+                  reason: `Constraint exhaustion: Unable to staff Invigilator for room ${room.id} on ${currentDate} ${session.name}.`,
                   details: [
-                    `Search budget exhausted at date ${currentDate}, session ${session.name}, room ${room.id}.`,
-                    `Total slots required: ${totalRequired}, assigned before exhaustion: ${totalAssigned} (${missingSlots} unfilled).`,
+                    `Search budget exhausted at date ${currentDate}, session ${session.name}, room ${room.id} (Role: Invigilator).`,
+                    `Total slots required: ${totalRequired}, assigned before exhaustion: ${totalAssigned}.`,
                     `All active teachers were either at capacity, assigned earlier today, assigned on a consecutive examination date, on leave, exempt, or excluded by room department.`,
+                  ],
+                  remedies: preflight.remedies.length > 0 ? preflight.remedies : [
+                    'Register additional active eligible faculty.',
+                    'Increase maximum duty overrides for participating faculty.',
+                    'Designate dates as non-exam days or relax rest-day constraints.'
                   ],
                   bottleneck: {
                     date: currentDate,
                     session: session.name,
-                    required: requiredStaff,
+                    required: 2,
                     available: 0,
                   },
                 },
               };
             }
 
-            // Record assignment
-            const asgnId = `ASGN-${examinationId}-${currentDate.replace(/-/g, '')}-${session.name.substring(0, 1)}-${room.id}-${candidate.id}`;
+            // Temporarily record invigilator
+            sessionAssignedFaculty.add(invigilator.id);
+            todayAssigned.add(invigilator.id);
+            currentDutyCounts.set(invigilator.id, (currentDutyCounts.get(invigilator.id) || 0) + 1);
+            lastAssignedDate.set(invigilator.id, currentDate);
+            lastAssignedRoom.set(invigilator.id, room.id);
+            if (!facultyRoomHistory.has(invigilator.id)) {
+              facultyRoomHistory.set(invigilator.id, new Map());
+            }
+            facultyRoomHistory.get(invigilator.id)!.set(currentDate, room.id);
+
+            // 2. Select distinct Frisking Teacher (todayAssigned includes invigilator so invigilator cannot be chosen)
+            const frisking = SchedulingEngine.selectBestCandidate({
+              faculty: activeFaculty,
+              currentDate,
+              session: session.name,
+              targetRoom: room,
+              currentDutyCounts,
+              lastAssignedDate,
+              lastAssignedRoom,
+              todayAssigned,
+              leaves,
+              defaultMaxDuties,
+              restDays,
+              dateIndexMap,
+              facultySeedScores,
+              facultyRoomHistory,
+            });
+
+            if (!frisking) {
+              const totalRequired = preflight.totalRequiredSlots;
+              const totalAssigned = generatedAssignments.length * 2 + 1;
+              return {
+                success: false,
+                isInconclusive: true,
+                assignments: generatedAssignments,
+                seed: effectiveSeed,
+                preflight,
+                validation: {
+                  isValid: false,
+                  violations: [
+                    {
+                      rule: 'RULE_A',
+                      message: `Unstaffed room: Room ${room.id} on ${currentDate} session ${session.name} has no eligible candidates for Frisking Teacher under active constraints.`,
+                      date: currentDate,
+                      session: session.name,
+                      roomId: room.id,
+                    },
+                  ],
+                  coveragePercentage: totalRequired > 0 ? (totalAssigned / totalRequired) * 100 : 0,
+                  totalRequiredSlots: totalRequired,
+                  totalAssignedSlots: totalAssigned,
+                },
+                failureDiagnostics: {
+                  provenInfeasible: false,
+                  isInconclusive: true,
+                  reason: `Constraint exhaustion: Unable to staff distinct Frisking Teacher for room ${room.id} on ${currentDate} ${session.name}.`,
+                  details: [
+                    `Search budget exhausted at date ${currentDate}, session ${session.name}, room ${room.id} (Role: Frisking Teacher).`,
+                    `Invigilator ${invigilator.name} (${invigilator.id}) was staffed, but no second distinct eligible teacher is available.`,
+                    `Total slots required: ${totalRequired}, assigned before exhaustion: ${totalAssigned}.`,
+                  ],
+                  remedies: preflight.remedies.length > 0 ? preflight.remedies : [
+                    'Register additional active eligible faculty.',
+                    'Increase maximum duty overrides for participating faculty.',
+                    'Designate dates as non-exam days or relax rest-day constraints.'
+                  ],
+                  bottleneck: {
+                    date: currentDate,
+                    session: session.name,
+                    required: 2,
+                    available: 1,
+                  },
+                },
+              };
+            }
+
+            // Record frisking teacher
+            sessionAssignedFaculty.add(frisking.id);
+            todayAssigned.add(frisking.id);
+            currentDutyCounts.set(frisking.id, (currentDutyCounts.get(frisking.id) || 0) + 1);
+            lastAssignedDate.set(frisking.id, currentDate);
+            lastAssignedRoom.set(frisking.id, room.id);
+            if (!facultyRoomHistory.has(frisking.id)) {
+              facultyRoomHistory.set(frisking.id, new Map());
+            }
+            facultyRoomHistory.get(frisking.id)!.set(currentDate, room.id);
+
+            // Record dual-role room assignment
+            const asgnId = `ASGN-${examinationId}-${currentDate.replace(/-/g, '')}-${session.name.substring(0, 1)}-${room.id}-${invigilator.id}`;
             const asgn: Assignment = {
               id: asgnId,
               date: currentDate,
               session: session.name,
               roomId: room.id,
-              facultyId: candidate.id,
+              facultyId: invigilator.id,
+              facultyName: invigilator.name,
+              department: invigilator.department,
+              friskingFacultyId: frisking.id,
+              friskingFacultyName: frisking.name,
+              friskingDepartment: frisking.department,
+              role: 'DUAL',
               status: 'SCHEDULED',
             };
 
             generatedAssignments.push(asgn);
             sessionAssignments.push(asgn);
-            sessionAssignedFaculty.add(candidate.id);
-            todayAssigned.add(candidate.id);
+          } else {
+            // Standard single-role allocation
+            const requiredStaff = room.requiredStaffing ?? 1;
 
-            // Update state
-            currentDutyCounts.set(candidate.id, (currentDutyCounts.get(candidate.id) || 0) + 1);
-            lastAssignedDate.set(candidate.id, currentDate);
-            lastAssignedRoom.set(candidate.id, room.id);
+            for (let s = 0; s < requiredStaff; s++) {
+              // Find eligible candidate
+              const candidate = SchedulingEngine.selectBestCandidate({
+                faculty: activeFaculty,
+                currentDate,
+                session: session.name,
+                targetRoom: room,
+                currentDutyCounts,
+                lastAssignedDate,
+                lastAssignedRoom,
+                todayAssigned,
+                leaves,
+                defaultMaxDuties,
+                restDays,
+                dateIndexMap,
+                facultySeedScores,
+                facultyRoomHistory,
+              });
 
-            if (!facultyRoomHistory.has(candidate.id)) {
-              facultyRoomHistory.set(candidate.id, new Map());
+              if (!candidate) {
+                // Allocation stalled: could not find an eligible candidate for this room
+                const totalRequired = preflight.totalRequiredSlots;
+                const totalAssigned = generatedAssignments.length;
+                const missingSlots = totalRequired - totalAssigned;
+
+                return {
+                  success: false,
+                  isInconclusive: true,
+                  assignments: generatedAssignments,
+                  seed: effectiveSeed,
+                  preflight,
+                  validation: {
+                    isValid: false,
+                    violations: [
+                      {
+                        rule: 'RULE_A',
+                        message: `Unstaffed room: Room ${room.id} on ${currentDate} session ${session.name} has no eligible candidates under active constraints.`,
+                        date: currentDate,
+                        session: session.name,
+                        roomId: room.id,
+                      },
+                    ],
+                    coveragePercentage: (totalAssigned / totalRequired) * 100,
+                    totalRequiredSlots: totalRequired,
+                    totalAssignedSlots: totalAssigned,
+                  },
+                  failureDiagnostics: {
+                    provenInfeasible: false,
+                    isInconclusive: true,
+                    reason: `Constraint exhaustion: Unable to staff room ${room.id} on ${currentDate} ${session.name}.`,
+                    details: [
+                      `Search budget exhausted at date ${currentDate}, session ${session.name}, room ${room.id}.`,
+                      `Total slots required: ${totalRequired}, assigned before exhaustion: ${totalAssigned} (${missingSlots} unfilled).`,
+                      `All active teachers were either at capacity, assigned earlier today, assigned on a consecutive examination date, on leave, exempt, or excluded by room department.`,
+                    ],
+                    remedies: preflight.remedies.length > 0 ? preflight.remedies : [
+                      'Register additional active eligible faculty.',
+                      'Increase maximum duty overrides for participating faculty.',
+                      'Designate dates as non-exam days or relax rest-day constraints.'
+                    ],
+                    bottleneck: {
+                      date: currentDate,
+                      session: session.name,
+                      required: requiredStaff,
+                      available: 0,
+                    },
+                  },
+                };
+              }
+
+              // Record assignment
+              const asgnId = `ASGN-${examinationId}-${currentDate.replace(/-/g, '')}-${session.name.substring(0, 1)}-${room.id}-${candidate.id}`;
+              const asgn: Assignment = {
+                id: asgnId,
+                date: currentDate,
+                session: session.name,
+                roomId: room.id,
+                facultyId: candidate.id,
+                status: 'SCHEDULED',
+              };
+
+              generatedAssignments.push(asgn);
+              sessionAssignments.push(asgn);
+              sessionAssignedFaculty.add(candidate.id);
+              todayAssigned.add(candidate.id);
+
+              // Update state
+              currentDutyCounts.set(candidate.id, (currentDutyCounts.get(candidate.id) || 0) + 1);
+              lastAssignedDate.set(candidate.id, currentDate);
+              lastAssignedRoom.set(candidate.id, room.id);
+
+              if (!facultyRoomHistory.has(candidate.id)) {
+                facultyRoomHistory.set(candidate.id, new Map());
+              }
+              facultyRoomHistory.get(candidate.id)!.set(currentDate, room.id);
             }
-            facultyRoomHistory.get(candidate.id)!.set(currentDate, room.id);
           }
         }
 
@@ -288,11 +487,14 @@ export class SchedulingEngine {
       leaves,
       defaultMaxDuties,
       restDays,
+      timetableSessions,
+      requireDualRole,
     });
 
     if (!validationResult.isValid) {
       return {
         success: false,
+        isInconclusive: false,
         assignments: generatedAssignments,
         seed: effectiveSeed,
         preflight,
@@ -399,7 +601,7 @@ export class SchedulingEngine {
       const onLeave = leaves.some((l) => {
         if (l.facultyId !== teacher.id || l.date !== currentDate) return false;
         if (l.approvalStatus === 'REJECTED') return false;
-        if (l.sessionScope === 'FULL_DAY') return true;
+        if (l.sessionScope === 'FULL_DAY' || !l.sessionScope) return true;
         if (l.sessionScope === 'MORNING' && session.toLowerCase().includes('morn')) return true;
         if (l.sessionScope === 'AFTERNOON' && session.toLowerCase().includes('after')) return true;
         return false;

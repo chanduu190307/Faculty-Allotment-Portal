@@ -48,6 +48,12 @@ export interface Assignment {
   session: string;
   roomId: string;
   facultyId: string;
+  facultyName?: string;
+  department?: string;
+  friskingFacultyId?: string | null;
+  friskingFacultyName?: string | null;
+  friskingDepartment?: string | null;
+  role?: string; // 'INVIGILATOR', 'FRISKING', or 'DUAL'
   status: 'SCHEDULED' | 'COMPLETED' | 'ABSENT' | 'CANCELLED' | 'SUBSTITUTED';
   markedAt?: string;
   markedBy?: string;
@@ -100,6 +106,7 @@ export interface PreflightCheckResult {
   maxWorkingDaysPerTeacher: number;
   reasons: string[];
   remedies: string[];
+  warnings?: string[];
   dailyShortfalls?: Array<{
     date: string;
     required: number;
@@ -121,6 +128,21 @@ export interface PreflightCheckResult {
     defaultMaxDuties: number;
     effectiveMaxDutiesPerTeacher: number;
     theoreticalMaxCapacity: number;
+    expectedRoomCount?: number;
+    registeredRoomsTotal?: number;
+    registeredRoomsActive?: number;
+    roomsMismatch?: boolean;
+    expectedFacultyCount?: number;
+    registeredFacultyTotal?: number;
+    registeredFacultyActive?: number;
+    registeredFacultyExempt?: number;
+    registeredFacultyUnavailable?: number;
+    eligibleFacultyCount?: number;
+    facultyMismatch?: boolean;
+    timetableRecordsCount?: number;
+    timetableSessionsCount?: number;
+    timetableConfirmed?: boolean;
+    requireDualRole?: boolean;
   };
 }
 
@@ -162,6 +184,8 @@ export interface SchedulingInput {
   seed?: number | null;
   existingDuties?: Record<string, number>;
   pastRoomHistory?: Record<string, Record<string, string>>; // facultyId -> date -> roomId
+  timetableSessions?: Array<{ date: string; session: string }>; // Optional confirmed timetable date-session pairs
+  requireDualRole?: boolean;
 }
 
 export interface ScheduleRecord {
@@ -187,6 +211,7 @@ export interface ScheduleRecord {
 
 export interface ScheduleGenerationResult {
   success: boolean;
+  isInconclusive?: boolean;
   scheduleId?: string;
   state?: string;
   version?: number;
@@ -201,8 +226,10 @@ export interface ScheduleGenerationResult {
   sessionAccountings?: SessionAccounting[];
   failureDiagnostics?: {
     provenInfeasible: boolean;
+    isInconclusive?: boolean;
     reason: string;
     details: string[];
+    remedies?: string[];
     bottleneck?: {
       date: string;
       session: string;

@@ -7,6 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "db:init": "tsx src/db/init.ts",
+    "db:seed": "tsx src/db/seed.ts",
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -17,6 +18,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@types/pdf-parse": "^1.1.5",
     "better-sqlite3": "^13.0.3",
     "cors": "^2.8.6",
     "csv-parse": "^7.0.3",
@@ -24,6 +26,7 @@
     "dotenv": "^18.0.7",
     "exceljs": "^4.4.0",
     "express": "^5.3.0",
+    "pdf-parse": "^2.4.5",
     "pdfkit": "^0.20.2",
     "zod": "^4.6.7"
   },

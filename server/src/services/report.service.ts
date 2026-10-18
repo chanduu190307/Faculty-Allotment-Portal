@@ -104,9 +104,13 @@ export class ReportService {
 
     const assignments = db
       .prepare(`
-        SELECT a.*, f.name as faculty_name, f.department, f.designation, r.name as room_name, r.building
+        SELECT a.*, 
+               f.name as faculty_name, f.department, f.designation,
+               frisk.name as frisking_faculty_name, frisk.department as frisking_department, frisk.designation as frisking_designation,
+               r.name as room_name, r.building, r.floor
         FROM assignments a
         JOIN faculty f ON a.faculty_id = f.id
+        LEFT JOIN faculty frisk ON a.frisking_faculty_id = frisk.id
         JOIN rooms r ON a.room_id = r.id
         WHERE a.schedule_id = ? AND a.date = ?
         ORDER BY a.session ASC, a.room_id ASC
@@ -134,8 +138,12 @@ export class ReportService {
       else if (a.status === 'SUBSTITUTED') substitutedCount++;
     }
 
-    // Faculty accounting for this date
-    const assignedFacIds = new Set(assignments.map((a) => a.faculty_id));
+    // Faculty accounting for this date (both Invigilator and Frisking teacher)
+    const assignedFacIds = new Set<string>();
+    assignments.forEach((a) => {
+      if (a.faculty_id) assignedFacIds.add(a.faculty_id);
+      if (a.frisking_faculty_id) assignedFacIds.add(a.frisking_faculty_id);
+    });
     const unassignedFaculty = (exam.faculty || [])
       .filter((f) => !assignedFacIds.has(f.id))
       .map((f) => {
@@ -411,6 +419,7 @@ export class ReportService {
         a.date,
         a.session,
         a.status,
+        a.role,
         r.id as room_id,
         r.name as room_name,
         r.building,
@@ -418,10 +427,15 @@ export class ReportService {
         f.id as faculty_id,
         f.name as faculty_name,
         f.department,
-        f.designation
+        f.designation,
+        frisk.id as frisking_faculty_id,
+        frisk.name as frisking_faculty_name,
+        frisk.department as frisking_department,
+        frisk.designation as frisking_designation
       FROM assignments a
       JOIN rooms r ON a.room_id = r.id
       JOIN faculty f ON a.faculty_id = f.id
+      LEFT JOIN faculty frisk ON a.frisking_faculty_id = frisk.id
       WHERE a.schedule_id = ? AND a.status != 'CANCELLED'
     `;
     const params: any[] = [scheduleId];
@@ -463,6 +477,10 @@ export class ReportService {
       facultyName: r.faculty_name,
       department: r.department,
       designation: r.designation,
+      friskingFacultyId: r.frisking_faculty_id || undefined,
+      friskingFacultyName: r.frisking_faculty_name || undefined,
+      friskingDepartment: r.frisking_department || undefined,
+      friskingDesignation: r.frisking_designation || undefined,
       status: r.status,
       timeInField: '',
       signatureField: '',
@@ -485,6 +503,10 @@ export interface RoomSheetData {
   facultyName: string;
   department: string;
   designation: string;
+  friskingFacultyId?: string;
+  friskingFacultyName?: string;
+  friskingDepartment?: string;
+  friskingDesignation?: string;
   status: string;
   timeInField: string;
   signatureField: string;

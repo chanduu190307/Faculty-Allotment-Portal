@@ -34,8 +34,28 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
 export const api = {
   // Settings
   getSettings: () => request<{ success: boolean; data: Record<string, string> }>('/settings'),
+  getSettingsSummary: () =>
+    request<{
+      success: boolean;
+      data: {
+        expectedRooms: number;
+        registeredRoomsTotal: number;
+        registeredRoomsActive: number;
+        roomsMismatch: boolean;
+        expectedFaculty: number;
+        registeredFacultyTotal: number;
+        registeredFacultyActive: number;
+        registeredFacultyExempt: number;
+        registeredFacultyUnavailable: number;
+        eligibleFacultyCount: number;
+        facultyMismatch: boolean;
+        defaultMaxDuties: number;
+        sessionsPerDay: number;
+        institutionName: string;
+      };
+    }>('/settings/summary'),
   updateSettings: (settings: Record<string, string>) =>
-    request<{ success: boolean; data: Record<string, string> }>('/settings', {
+    request<{ success: boolean; data: Record<string, string>; summary?: any }>('/settings', {
       method: 'PUT',
       body: JSON.stringify(settings),
     }),
@@ -70,6 +90,10 @@ export const api = {
     request<{ success: boolean }>(`/faculty/${id}`, {
       method: 'DELETE',
     }),
+  deactivateFaculty: (id: string) =>
+    request<{ success: boolean; data: any }>(`/faculty/${id}/deactivate`, {
+      method: 'PUT',
+    }),
 
   // Faculty Leaves
   getLeaves: (facultyId?: string, date?: string) => {
@@ -89,10 +113,11 @@ export const api = {
     }),
 
   // Rooms
-  getRooms: (params: { search?: string; building?: string; active?: boolean; limit?: number; offset?: number } = {}) => {
+  getRooms: (params: { search?: string; building?: string; floor?: number; active?: boolean; limit?: number; offset?: number } = {}) => {
     const q = new URLSearchParams();
     if (params.search) q.set('search', params.search);
     if (params.building) q.set('building', params.building);
+    if (params.floor !== undefined) q.set('floor', String(params.floor));
     if (params.active !== undefined) q.set('active', String(params.active));
     if (params.limit) q.set('limit', String(params.limit));
     if (params.offset) q.set('offset', String(params.offset));
@@ -113,6 +138,22 @@ export const api = {
     request<{ success: boolean }>(`/rooms/${id}`, {
       method: 'DELETE',
     }),
+  deactivateRoom: (id: string) =>
+    request<{ success: boolean; data: any }>(`/rooms/${id}/deactivate`, {
+      method: 'PUT',
+    }),
+  getRoomDiagnostics: () =>
+    request<{ success: boolean; data: any }>('/rooms/diagnostics'),
+  bulkGenerateRoomsPreview: (payload: { block: string; floor: number; count?: number; prefix?: string }) =>
+    request<{ success: boolean; data: any }>('/rooms/bulk-generate/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  bulkGenerateRoomsCommit: (payload: { block: string; floor: number; rooms: any[] }) =>
+    request<{ success: boolean; data: any }>('/rooms/bulk-generate/commit', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   // Examinations
   getExaminations: () => request<{ success: boolean; data: any[] }>('/examinations'),
@@ -120,6 +161,11 @@ export const api = {
   createExamination: (exam: any) =>
     request<{ success: boolean; data: any }>('/examinations', {
       method: 'POST',
+      body: JSON.stringify(exam),
+    }),
+  updateExamination: (id: string, exam: any) =>
+    request<{ success: boolean; data: any }>(`/examinations/${id}`, {
+      method: 'PUT',
       body: JSON.stringify(exam),
     }),
   updateExamDates: (id: string, dates: any[]) =>
@@ -134,14 +180,15 @@ export const api = {
     }),
 
   // Scheduling & Allotment
-  getPreflight: (examId: string) =>
+  getPreflight: (examId: string, requireDualRole?: boolean) =>
     request<{ success: boolean; data: any }>(`/allotment/preflight/${examId}`, {
       method: 'POST',
+      body: JSON.stringify({ requireDualRole }),
     }),
-  generateAllotment: (examId: string, seed?: number | null) =>
+  generateAllotment: (examId: string, seed?: number | null, requireDualRole?: boolean) =>
     request<{ success: boolean; data: any }>(`/allotment/generate/${examId}`, {
       method: 'POST',
-      body: JSON.stringify({ seed }),
+      body: JSON.stringify({ seed, requireDualRole }),
     }),
   getLatestSchedule: (examId: string) =>
     request<{ success: boolean; data: any }>(`/allotment/latest/${examId}`),
@@ -165,7 +212,13 @@ export const api = {
     }),
   manualReassign: (
     scheduleId: string,
-    payload: { assignmentId: string; newFacultyId: string; reason: string; expectedCounter?: number }
+    payload: {
+      assignmentId: string;
+      newFacultyId: string;
+      reason: string;
+      expectedCounter?: number;
+      roleTarget?: 'INVIGILATOR' | 'FRISKING';
+    }
   ) =>
     request<{ success: boolean; isRevision?: boolean; revisionScheduleId?: string; newCounter?: number }>(
       `/allotment/${scheduleId}/reassign`,
@@ -235,11 +288,24 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  previewFacultyPdfImport: (payload: { fileBase64: string; filename?: string; allowUpdateExisting?: boolean }) =>
+    request<{ success: boolean; preview: any }>('/import/faculty/pdf/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   commitFacultyImport: (payload: { rows: any[]; allowUpdateExisting?: boolean }) =>
     request<{ success: boolean; imported: number; updated: number }>('/import/faculty/commit', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+  commitFacultyPdfImport: (payload: { records: any[]; allowUpdateExisting?: boolean }) =>
+    request<{ success: boolean; imported: number; updated: number; skipped: number; failed: number }>(
+      '/import/faculty/pdf/commit',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
   previewRoomImport: (payload: { fileBase64: string; fileType: 'csv' | 'xlsx'; allowUpdateExisting?: boolean }) =>
     request<{ success: boolean; preview: any }>('/import/rooms/preview', {
       method: 'POST',
@@ -249,5 +315,44 @@ export const api = {
     request<{ success: boolean; imported: number; updated: number }>('/import/rooms/commit', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  // Timetable PDF Import Services
+  previewTimetablePdfImport: (payload: { fileBase64: string; filename?: string; examinationId: string }) =>
+    request<{ success: boolean; preview: any }>('/import/timetable/pdf/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  commitTimetablePdfImport: (payload: { examinationId: string; records: any[] }) =>
+    request<{
+      success: boolean;
+      imported: number;
+      updated: number;
+      skipped: number;
+      rejected: number;
+      distinctDates: string[];
+      distinctSessions: string[];
+    }>('/import/timetable/pdf/commit', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  getExamTimetable: (examinationId: string) =>
+    request<{ success: boolean; data: any[]; count: number }>(`/examinations/${examinationId}/timetable`),
+  deleteExamTimetable: (examinationId: string) =>
+    request<{ success: boolean; message: string }>(`/examinations/${examinationId}/timetable`, {
+      method: 'DELETE',
+    }),
+
+  // Cleanup & Reset Services
+  getCleanupPreview: () =>
+    request<{ success: boolean; data: any }>('/cleanup/preview'),
+  executeCleanup: () =>
+    request<{ success: boolean; data: any }>('/cleanup/execute', {
+      method: 'POST',
+    }),
+  resetDatabase: (confirmation: string) =>
+    request<{ success: boolean; data: any }>('/cleanup/reset', {
+      method: 'POST',
+      body: JSON.stringify({ confirmation }),
     }),
 };

@@ -28,10 +28,13 @@ export class ExportService {
       'Room ID',
       'Room Name',
       'Building / Block',
-      'Faculty ID',
-      'Faculty Name',
-      'Department',
-      'Designation',
+      'Floor',
+      'Invigilator ID',
+      'Invigilator Name',
+      'Invigilator Dept',
+      'Frisking Teacher ID',
+      'Frisking Teacher Name',
+      'Frisking Dept',
       'Duty Status',
     ]);
 
@@ -48,10 +51,13 @@ export class ExportService {
         a.room_id,
         a.room_name,
         a.building,
+        a.floor ?? '',
         a.faculty_id,
         a.faculty_name,
         a.department,
-        a.designation,
+        a.frisking_faculty_id || 'N/A',
+        a.frisking_faculty_name || (a.frisking_faculty_id ? a.frisking_faculty_id : 'N/A'),
+        a.frisking_department || 'N/A',
         a.status,
       ]);
     }
@@ -108,7 +114,10 @@ export class ExportService {
         // Print assignments
         doc.fontSize(8);
         for (const a of report.roomAssignments) {
-          const line = `[${a.session}] Room ${a.room_id} (${a.building}): ${a.faculty_name} (${a.faculty_id}, ${a.department}) — Status: ${a.status}`;
+          const friskingText = a.frisking_faculty_name
+            ? ` | Frisking: ${a.frisking_faculty_name} (${a.frisking_department || 'Faculty'})`
+            : '';
+          const line = `[${a.session}] Room ${a.room_name || a.room_id} (${a.building}, Fl ${a.floor ?? '-'}): Invigilator: ${a.faculty_name} (${a.department})${friskingText} — Status: ${a.status}`;
           doc.text(line);
           if (doc.y > 750) {
             doc.addPage();
@@ -529,59 +538,64 @@ export class ExportService {
           doc.fillColor('#6D736B').font('Helvetica').text('Building & Floor:', col2X, rowY);
           doc.fillColor('#242923').font('Helvetica').text(`${sheet.building}, Floor ${sheet.floor}`, col2X + 80, rowY);
 
-          // Assigned Invigilator Section
+          // Assigned Staff Section
           curY += 98;
-          doc.fillColor('#244C3A').fontSize(11).font('Helvetica-Bold').text('2. Assigned Invigilator Details', 36, curY);
+          doc.fillColor('#244C3A').fontSize(11).font('Helvetica-Bold').text('2. Assigned Examination Room Staff', 36, curY);
           curY += 18;
 
-          doc.rect(36, curY, 523, 80).fillColor('#FFFEFA').fill().strokeColor('#E2E0D7').lineWidth(1).stroke();
+          const staffBoxHeight = sheet.friskingFacultyName ? 96 : 80;
+          doc.rect(36, curY, 523, staffBoxHeight).fillColor('#FFFEFA').fill().strokeColor('#E2E0D7').lineWidth(1).stroke();
 
-          rowY = curY + 12;
-          doc.fillColor('#6D736B').fontSize(9).font('Helvetica').text('Faculty ID:', col1X, rowY);
-          doc.fillColor('#242923').font('Courier-Bold').text(sheet.facultyId, col1X + 90, rowY);
+          rowY = curY + 10;
+          doc.fillColor('#6D736B').fontSize(9).font('Helvetica').text('Invigilator:', col1X, rowY);
+          doc.fillColor('#244C3A').fontSize(10).font('Helvetica-Bold').text(`${sheet.facultyName} (${sheet.department})`, col1X + 70, rowY);
 
-          doc.fillColor('#6D736B').font('Helvetica').text('Department:', col2X, rowY);
-          doc.fillColor('#242923').font('Helvetica-Bold').text(sheet.department, col2X + 80, rowY);
+          doc.fillColor('#6D736B').fontSize(9).font('Helvetica').text('Invigilator ID:', col2X, rowY);
+          doc.fillColor('#242923').font('Courier-Bold').text(sheet.facultyId, col2X + 80, rowY);
 
-          rowY += 24;
-          doc.fillColor('#6D736B').font('Helvetica').text('Faculty Name:', col1X, rowY);
-          doc.fillColor('#242923').fontSize(11).font('Helvetica-Bold').text(sheet.facultyName, col1X + 90, rowY - 1);
+          if (sheet.friskingFacultyName) {
+            rowY += 22;
+            doc.fillColor('#6D736B').fontSize(9).font('Helvetica').text('Frisking Staff:', col1X, rowY);
+            doc.fillColor('#244C3A').fontSize(10).font('Helvetica-Bold').text(`${sheet.friskingFacultyName} (${sheet.friskingDepartment || 'Faculty'})`, col1X + 70, rowY);
 
-          doc.fillColor('#6D736B').fontSize(9).font('Helvetica').text('Designation:', col2X, rowY);
-          doc.fillColor('#242923').font('Helvetica').text(sheet.designation, col2X + 80, rowY);
+            doc.fillColor('#6D736B').fontSize(9).font('Helvetica').text('Frisking ID:', col2X, rowY);
+            doc.fillColor('#242923').font('Courier-Bold').text(sheet.friskingFacultyId || 'N/A', col2X + 80, rowY);
+          }
 
           // Duty Verification & Handwriting Section
-          curY += 104;
+          curY += staffBoxHeight + 14;
           doc.fillColor('#244C3A').fontSize(11).font('Helvetica-Bold').text('3. Attendance Verification & Sign-Off (For Physical Handwriting)', 36, curY);
           curY += 18;
 
-          doc.rect(36, curY, 523, 210).fillColor('#FFFEFA').fill().strokeColor('#E2E0D7').lineWidth(1).stroke();
+          doc.rect(36, curY, 523, 190).fillColor('#FFFEFA').fill().strokeColor('#E2E0D7').lineWidth(1).stroke();
 
           // Handwriting boxes
-          let boxY = curY + 16;
+          let boxY = curY + 14;
 
           // Time-In field
-          doc.fillColor('#242923').fontSize(10).font('Helvetica-Bold').text('Time-In Record:', 48, boxY);
-          doc.rect(140, boxY - 4, 150, 24).strokeColor('#C8C5B9').stroke();
-          doc.fillColor('#6D736B').fontSize(8).font('Helvetica').text('Reporting Time (e.g. 09:45 AM)', 300, boxY + 4);
+          doc.fillColor('#242923').fontSize(9).font('Helvetica-Bold').text('Time-In Record:', 48, boxY);
+          doc.rect(140, boxY - 3, 140, 20).strokeColor('#C8C5B9').stroke();
+          doc.fillColor('#6D736B').fontSize(8).font('Helvetica').text('Reporting Time (e.g. 09:45 AM)', 290, boxY + 2);
 
-          boxY += 40;
+          boxY += 34;
           // Material Received Checkbox
-          doc.fillColor('#242923').fontSize(10).font('Helvetica-Bold').text('Material Verification:', 48, boxY);
-          doc.rect(160, boxY - 2, 12, 12).strokeColor('#242923').stroke();
-          doc.fillColor('#242923').fontSize(9).font('Helvetica').text('Question Papers & Answer Booklets Received & Counted', 180, boxY);
+          doc.fillColor('#242923').fontSize(9).font('Helvetica-Bold').text('Material Verification:', 48, boxY);
+          doc.rect(160, boxY - 2, 10, 10).strokeColor('#242923').stroke();
+          doc.fillColor('#242923').fontSize(8).font('Helvetica').text('Question Papers & Answer Booklets Counted & Verified', 178, boxY);
 
-          boxY += 40;
-          // Invigilator Signature Line
-          doc.fillColor('#242923').fontSize(9).font('Helvetica-Bold').text('Invigilator Signature:', 48, boxY);
-          doc.moveTo(160, boxY + 12).lineTo(340, boxY + 12).strokeColor('#242923').lineWidth(1).stroke();
-          doc.fillColor('#6D736B').fontSize(8).font('Helvetica').text('(Sign on duty commencement)', 350, boxY + 4);
+          boxY += 34;
+          // Signatures for Invigilator and Frisking Teacher
+          doc.fillColor('#242923').fontSize(9).font('Helvetica-Bold').text('Invigilator Sign:', 48, boxY);
+          doc.moveTo(130, boxY + 10).lineTo(270, boxY + 10).strokeColor('#242923').lineWidth(1).stroke();
 
-          boxY += 44;
+          doc.fillColor('#242923').fontSize(9).font('Helvetica-Bold').text('Frisking Teacher Sign:', 290, boxY);
+          doc.moveTo(400, boxY + 10).lineTo(540, boxY + 10).strokeColor('#242923').lineWidth(1).stroke();
+
+          boxY += 36;
           // Chief Superintendent / Officer Verification
           doc.fillColor('#242923').fontSize(9).font('Helvetica-Bold').text('Control Room Verification:', 48, boxY);
-          doc.moveTo(180, boxY + 12).lineTo(380, boxY + 12).strokeColor('#242923').lineWidth(1).stroke();
-          doc.fillColor('#6D736B').fontSize(8).font('Helvetica').text('(Examination Officer Signature)', 390, boxY + 4);
+          doc.moveTo(180, boxY + 10).lineTo(380, boxY + 10).strokeColor('#242923').lineWidth(1).stroke();
+          doc.fillColor('#6D736B').fontSize(8).font('Helvetica').text('(Examination Officer Signature)', 390, boxY + 2);
 
           // Footer
           doc.fontSize(8).fillColor('#6D736B').text(

@@ -2,6 +2,7 @@ import { getDatabase } from '../db/connection';
 import { AuditService } from './audit.service';
 import { ExamService } from './exam.service';
 import { FacultyService } from './faculty.service';
+import { TimetableService } from './timetable.service';
 import { SchedulingEngine } from '../domain/scheduling/engine';
 import { validateSchedule, validateManualReassignment } from '../domain/scheduling/validator';
 import {
@@ -20,7 +21,8 @@ export class ScheduleService {
   public static generate(
     examinationId: string,
     actor = 'System Admin',
-    seed: number | null = null
+    seed: number | null = null,
+    options?: { requireDualRole?: boolean }
   ): ScheduleGenerationResult {
     const exam = ExamService.getById(examinationId);
     if (!exam) {
@@ -28,10 +30,18 @@ export class ScheduleService {
     }
 
     const leaves = FacultyService.getLeaves();
+    const timetableRecords = TimetableService.getTimetable(examinationId);
+    const timetableSessions = timetableRecords.length > 0
+      ? timetableRecords.map((t) => ({ date: t.examDate, session: t.session }))
+      : undefined;
 
     // Use passed seed or generate a reproducible deterministic seed
     const finalSeed =
       seed !== undefined && seed !== null ? seed : Math.floor(Math.random() * 900000) + 100000;
+
+    const requireDualRole = options?.requireDualRole !== undefined 
+      ? options.requireDualRole 
+      : (exam.defaultStaffingPerRoom >= 2);
 
     // Call pure SchedulingEngine with restDays and finalSeed
     const result = SchedulingEngine.generateSchedule({
@@ -44,6 +54,8 @@ export class ScheduleService {
       defaultMaxDuties: exam.maxDutiesPerFaculty,
       restDays: exam.restDays ?? 1,
       seed: finalSeed,
+      timetableSessions,
+      requireDualRole,
     });
 
     if (!result.success) {
@@ -101,10 +113,13 @@ export class ScheduleService {
         now
       );
 
-      // Insert all generated assignments
+      // Insert all generated assignments (including both Invigilator and Frisking Teacher)
       const insertAsgn = db.prepare(`
-        INSERT INTO assignments (id, schedule_id, date, session, room_id, faculty_id, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO assignments (
+          id, schedule_id, date, session, room_id, faculty_id,
+          frisking_faculty_id, role, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const asgn of result.assignments) {
@@ -117,6 +132,8 @@ export class ScheduleService {
           asgn.session,
           asgn.roomId,
           asgn.facultyId,
+          asgn.friskingFacultyId || null,
+          asgn.role || (asgn.friskingFacultyId ? 'DUAL' : 'INVIGILATOR'),
           'SCHEDULED',
           now,
           now
@@ -214,9 +231,13 @@ export class ScheduleService {
 
     const assignments = db
       .prepare(`
-        SELECT a.*, f.name as faculty_name, f.department, f.designation, r.name as room_name, r.building, r.floor
+        SELECT a.*,
+               f.name as faculty_name, f.department, f.designation,
+               ff.name as frisking_faculty_name, ff.department as frisking_department, ff.designation as frisking_designation,
+               r.name as room_name, r.building, r.floor
         FROM assignments a
         JOIN faculty f ON a.faculty_id = f.id
+        LEFT JOIN faculty ff ON a.frisking_faculty_id = ff.id
         JOIN rooms r ON a.room_id = r.id
         WHERE a.schedule_id = ?
         ORDER BY a.date ASC, a.session ASC, a.room_id ASC
@@ -269,13 +290,20 @@ export class ScheduleService {
       session: a.session,
       roomId: a.room_id,
       facultyId: a.faculty_id,
+      friskingFacultyId: a.frisking_faculty_id || null,
+      role: a.role || (a.frisking_faculty_id ? 'DUAL' : 'INVIGILATOR'),
       status: a.status,
       markedAt: a.marked_at,
       markedBy: a.marked_by,
       notes: a.notes,
     }));
     const leaves = FacultyService.getLeaves();
+    const timetableRecords = TimetableService.getTimetable(sched.examination_id);
+    const timetableSessions = timetableRecords.length > 0
+      ? timetableRecords.map((t) => ({ date: t.examDate, session: t.session }))
+      : undefined;
 
+    const isDual = rawAssignments.some((a) => a.role === 'DUAL' || a.frisking_faculty_id);
     const validation = validateSchedule(assignments, {
       dates: exam.dates || [],
       sessions: exam.sessionConfig,
@@ -284,6 +312,8 @@ export class ScheduleService {
       leaves,
       defaultMaxDuties: exam.maxDutiesPerFaculty,
       restDays: exam.restDays ?? 1,
+      timetableSessions,
+      requireDualRole: isDual,
     });
 
     const now = new Date().toISOString();
@@ -392,6 +422,8 @@ export class ScheduleService {
       session: a.session,
       roomId: a.room_id,
       facultyId: a.faculty_id,
+      friskingFacultyId: a.frisking_faculty_id || null,
+      role: a.role || (a.frisking_faculty_id ? 'DUAL' : 'INVIGILATOR'),
       status: a.status,
       markedAt: a.marked_at,
       markedBy: a.marked_by,
@@ -399,6 +431,12 @@ export class ScheduleService {
     }));
 
     const leaves = FacultyService.getLeaves();
+    const timetableRecords = TimetableService.getTimetable(sched.examination_id);
+    const timetableSessions = timetableRecords.length > 0
+      ? timetableRecords.map((t) => ({ date: t.examDate, session: t.session }))
+      : undefined;
+
+    const isDual = rawAssignments.some((a) => a.role === 'DUAL' || a.frisking_faculty_id);
     const valResult = validateSchedule(assignments, {
       dates: exam.dates || [],
       sessions: exam.sessionConfig,
@@ -407,6 +445,8 @@ export class ScheduleService {
       leaves,
       defaultMaxDuties: exam.maxDutiesPerFaculty,
       restDays: exam.restDays ?? 1,
+      timetableSessions,
+      requireDualRole: isDual,
     });
 
     if (!valResult.isValid || valResult.violations.length > 0) {
@@ -531,7 +571,8 @@ export class ScheduleService {
     newFacultyId: string,
     reason: string,
     actor = 'System Admin',
-    expectedCounter?: number
+    expectedCounter?: number,
+    roleTarget: 'INVIGILATOR' | 'FRISKING' = 'INVIGILATOR'
   ): {
     success: boolean;
     isRevision?: boolean;
@@ -578,33 +619,67 @@ export class ScheduleService {
       session: a.session,
       roomId: a.room_id,
       facultyId: a.faculty_id,
+      friskingFacultyId: a.frisking_faculty_id || null,
+      role: a.role || (a.frisking_faculty_id ? 'DUAL' : 'INVIGILATOR'),
       status: a.status,
       markedAt: a.marked_at,
       markedBy: a.marked_by,
       notes: a.notes,
     }));
 
+    const isDual = rawExisting.some((a) => a.role === 'DUAL' || a.frisking_faculty_id);
     const candidate: Assignment = {
       id: currentAsgn.id,
       scheduleId: currentAsgn.schedule_id,
       date: currentAsgn.date,
       session: currentAsgn.session,
       roomId: currentAsgn.room_id,
-      facultyId: newFacultyId,
+      facultyId: roleTarget === 'INVIGILATOR' ? newFacultyId : currentAsgn.faculty_id,
+      friskingFacultyId: roleTarget === 'FRISKING' ? newFacultyId : currentAsgn.frisking_faculty_id,
+      role: currentAsgn.role || (isDual ? 'DUAL' : 'INVIGILATOR'),
       status: currentAsgn.status || 'SCHEDULED',
     };
 
-    const leaves = FacultyService.getLeaves();
+    // Check distinctness: Invigilator and Frisking teacher cannot be the same person
+    if (candidate.facultyId && candidate.friskingFacultyId && candidate.facultyId === candidate.friskingFacultyId) {
+      return {
+        success: false,
+        error: `The same faculty member cannot serve as both Invigilator and Frisking Teacher for Room ${candidate.roomId}.`,
+        violations: [
+          {
+            rule: 'DUPLICATE',
+            message: `Faculty ${newFacultyId} cannot fill both Invigilator and Frisking Teacher roles simultaneously for Room ${candidate.roomId}.`,
+            date: candidate.date,
+            session: candidate.session,
+            roomId: candidate.roomId,
+            facultyId: newFacultyId,
+          },
+        ],
+      };
+    }
 
-    const valResult = validateManualReassignment(candidate, existingAssignments, {
-      dates: exam.dates || [],
-      sessions: exam.sessionConfig,
-      rooms: exam.rooms || [],
-      faculty: exam.faculty || [],
-      leaves,
-      defaultMaxDuties: exam.maxDutiesPerFaculty,
-      restDays: exam.restDays ?? 1,
-    });
+    const leaves = FacultyService.getLeaves();
+    const timetableRecords = TimetableService.getTimetable(sched.examination_id);
+    const timetableSessions = timetableRecords.length > 0
+      ? timetableRecords.map((t) => ({ date: t.examDate, session: t.session }))
+      : undefined;
+
+    const valResult = validateManualReassignment(
+      candidate,
+      existingAssignments,
+      {
+        dates: exam.dates || [],
+        sessions: exam.sessionConfig,
+        rooms: exam.rooms || [],
+        faculty: exam.faculty || [],
+        leaves,
+        defaultMaxDuties: exam.maxDutiesPerFaculty,
+        restDays: exam.restDays ?? 1,
+        timetableSessions,
+        requireDualRole: isDual,
+      },
+      roleTarget
+    );
 
     if (!valResult.valid) {
       return {
@@ -615,9 +690,14 @@ export class ScheduleService {
     }
 
     // Also run full validateSchedule across the complete modified assignment set
-    const proposedAssignments = existingAssignments.map((a) =>
-      a.id === assignmentId ? { ...a, facultyId: newFacultyId } : a
-    );
+    const proposedAssignments = existingAssignments.map((a) => {
+      if (a.id !== assignmentId) return a;
+      return {
+        ...a,
+        facultyId: roleTarget === 'INVIGILATOR' ? newFacultyId : a.facultyId,
+        friskingFacultyId: roleTarget === 'FRISKING' ? newFacultyId : a.friskingFacultyId,
+      };
+    });
 
     const fullVal = validateSchedule(proposedAssignments, {
       dates: exam.dates || [],
@@ -627,6 +707,8 @@ export class ScheduleService {
       leaves,
       defaultMaxDuties: exam.maxDutiesPerFaculty,
       restDays: exam.restDays ?? 1,
+      timetableSessions,
+      requireDualRole: isDual,
     });
 
     if (!fullVal.isValid) {
@@ -703,12 +785,16 @@ export class ScheduleService {
 
         // Copy assignments to revision schedule with candidate modification
         const insertAsgn = db.prepare(`
-          INSERT INTO assignments (id, schedule_id, date, session, room_id, faculty_id, status, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO assignments (
+            id, schedule_id, date, session, room_id, faculty_id,
+            frisking_faculty_id, role, status, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         for (const asgn of existingAssignments) {
-          const facId = asgn.id === assignmentId ? newFacultyId : asgn.facultyId;
+          const facId = asgn.id === assignmentId && roleTarget === 'INVIGILATOR' ? newFacultyId : asgn.facultyId;
+          const friskFacId = asgn.id === assignmentId && roleTarget === 'FRISKING' ? newFacultyId : asgn.friskingFacultyId;
           const newAsgnId = `${revScheduleId}-${asgn.date.replace(/-/g, '')}-${asgn.session.substring(0, 1)}-${asgn.roomId}-${facId}`;
           insertAsgn.run(
             newAsgnId,
@@ -717,6 +803,8 @@ export class ScheduleService {
             asgn.session,
             asgn.roomId,
             facId,
+            friskFacId || null,
+            asgn.role || (friskFacId ? 'DUAL' : 'INVIGILATOR'),
             asgn.status || 'SCHEDULED',
             now,
             now
@@ -734,6 +822,8 @@ export class ScheduleService {
             sourceScheduleId: sched.id,
             assignmentId,
             facultyId: currentAsgn.faculty_id,
+            friskingFacultyId: currentAsgn.frisking_faculty_id,
+            roleTarget,
             counter: sched.counter,
           },
           newValues: {
@@ -741,7 +831,9 @@ export class ScheduleService {
             version: sched.version,
             revisionNumber: nextRevNumber,
             assignmentId,
-            facultyId: newFacultyId,
+            facultyId: roleTarget === 'INVIGILATOR' ? newFacultyId : currentAsgn.faculty_id,
+            friskingFacultyId: roleTarget === 'FRISKING' ? newFacultyId : currentAsgn.frisking_faculty_id,
+            roleTarget,
             counter: 1,
           },
           reason: reason.trim(),
@@ -781,10 +873,16 @@ export class ScheduleService {
           throw new Error(`Concurrency conflict: schedule ${sched.id} was modified by another concurrent transaction.`);
         }
 
-        // In-place update of assignment
-        db.prepare(`
-          UPDATE assignments SET faculty_id = ?, updated_at = ? WHERE id = ?
-        `).run(newFacultyId, now, assignmentId);
+        // In-place update of assignment according to target role
+        if (roleTarget === 'FRISKING') {
+          db.prepare(`
+            UPDATE assignments SET frisking_faculty_id = ?, role = 'DUAL', updated_at = ? WHERE id = ?
+          `).run(newFacultyId, now, assignmentId);
+        } else {
+          db.prepare(`
+            UPDATE assignments SET faculty_id = ?, updated_at = ? WHERE id = ?
+          `).run(newFacultyId, now, assignmentId);
+        }
 
         // Log audit
         AuditService.log({
@@ -792,8 +890,18 @@ export class ScheduleService {
           entityId: assignmentId,
           action: 'MANUAL_REASSIGN',
           actor,
-          oldValues: { facultyId: currentAsgn.faculty_id, counter: sched.counter },
-          newValues: { facultyId: newFacultyId, counter: sched.counter + 1 },
+          oldValues: {
+            facultyId: currentAsgn.faculty_id,
+            friskingFacultyId: currentAsgn.frisking_faculty_id,
+            roleTarget,
+            counter: sched.counter,
+          },
+          newValues: {
+            facultyId: roleTarget === 'INVIGILATOR' ? newFacultyId : currentAsgn.faculty_id,
+            friskingFacultyId: roleTarget === 'FRISKING' ? newFacultyId : currentAsgn.frisking_faculty_id,
+            roleTarget,
+            counter: sched.counter + 1,
+          },
           reason: reason.trim(),
         }, db);
       });
